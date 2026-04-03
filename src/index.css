@@ -1,0 +1,33 @@
+*, *::before, *::after {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body, #root {
+  height: 100%;
+  width: 100%;
+  overflow-x: hidden;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  background: #0b1120;
+  color: #e8ecf4;
+}
+
+/* Prevent pull-to-refresh on mobile (umpire scoring) */
+body {
+  overscroll-behavior-y: contain;
+}
+
+/* Remove tap highlight on mobile */
+* {
+  -webkit-tap-highlight-color: transparent;
+}
+
+input:focus {
+  outline: 2px solid #2d8653;
+  outline-offset: -1px;
+}
