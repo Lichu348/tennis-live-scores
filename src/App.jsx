@@ -1,8 +1,9 @@
 import { useState, useEffect, useCallback } from "react";
-import { Smartphone, Monitor, Settings } from "lucide-react";
+import { Smartphone, Monitor, Settings, Trophy } from "lucide-react";
 import UmpireMode from "./UmpireMode";
 import SpectatorMode from "./SpectatorMode";
 import AdminMode from "./AdminMode";
+import TournamentMode from "./TournamentMode";
 import PinModal from "./PinModal";
 import { getUmpirePin, setUmpirePin, hashPin, verifyPin } from "./firebase";
 import { S } from "./styles";
@@ -147,6 +148,7 @@ export default function App() {
   if (mode === "umpire") return <Shell><UmpireMode onBack={() => setMode(null)} onLock={handleLock} /></Shell>;
   if (mode === "spectator") return <Shell><SpectatorMode onBack={() => setMode(null)} /></Shell>;
   if (mode === "admin") return <Shell><AdminMode onBack={() => setMode(null)} /></Shell>;
+  if (mode === "tournament") return <Shell><TournamentMode onBack={() => setMode(null)} /></Shell>;
 
   return (
     <Shell>
@@ -190,6 +192,16 @@ export default function App() {
           borderColor="#3b82f633"
           title="Clubhouse TV"
           subtitle="Live scoreboard for all courts"
+        />
+
+        {/* Tournament button */}
+        <ModeButton
+          onClick={() => handleProtectedModeClick("tournament")}
+          icon={<Trophy size={32} color="#fff" />}
+          gradient={`linear-gradient(135deg, ${S.gold}, #b8860b)`}
+          borderColor="#d4a84333"
+          title="Tournaments"
+          subtitle="Create and manage tournament brackets"
         />
 
         {/* Admin button */}

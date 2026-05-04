@@ -320,3 +320,129 @@ export function releaseLock(match) {
   const { lockedBy, lockedAt, ...rest } = match;
   return rest;
 }
+
+/* ─── Tournament CRUD ─── */
+
+/**
+ * Create a new tournament.
+ */
+export async function createTournament(tournament) {
+  const id = tournament.id || `t-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+  const payload = {
+    ...tournament,
+    id,
+    createdAt: Date.now(),
+    createdBy: getSessionId(),
+  };
+  await set(ref(db, `tournaments/${id}`), payload);
+  return id;
+}
+
+/**
+ * Update a tournament.
+ */
+export async function updateTournament(id, updates) {
+  const tournamentRef = ref(db, `tournaments/${id}`);
+  const snap = await get(tournamentRef);
+  if (!snap.exists()) {
+    throw new Error(`Tournament ${id} not found`);
+  }
+  const current = snap.val();
+  await set(tournamentRef, { ...current, ...updates, updatedAt: Date.now() });
+}
+
+/**
+ * Delete a tournament and all associated matches.
+ */
+export async function deleteTournament(id) {
+  // First, delete any matches linked to this tournament
+  const matchesSnap = await get(ref(db, "matches"));
+  if (matchesSnap.exists()) {
+    const matches = matchesSnap.val();
+    for (const [matchId, match] of Object.entries(matches)) {
+      if (match.tournamentId === id) {
+        await remove(ref(db, `matches/${matchId}`));
+      }
+    }
+  }
+
+  // Then delete the tournament
+  await remove(ref(db, `tournaments/${id}`));
+}
+
+/**
+ * Load a single tournament by ID.
+ */
+export async function loadTournament(id) {
+  const snap = await get(ref(db, `tournaments/${id}`));
+  return snap.exists() ? snap.val() : null;
+}
+
+/**
+ * Subscribe to a single tournament.
+ */
+export function subscribeToTournament(id, callback) {
+  const tournamentRef = ref(db, `tournaments/${id}`);
+  const unsubscribe = onValue(
+    tournamentRef,
+    (snapshot) => {
+      callback(snapshot.exists() ? snapshot.val() : null);
+    },
+    (error) => {
+      console.error("Firebase tournament subscription error:", error);
+      callback(null);
+    }
+  );
+  return unsubscribe;
+}
+
+/**
+ * Subscribe to all tournaments.
+ */
+export function subscribeToTournaments(callback, onError) {
+  const tournamentsRef = ref(db, "tournaments");
+  const unsubscribe = onValue(
+    tournamentsRef,
+    (snapshot) => {
+      const data = snapshot.val();
+      if (!data) {
+        callback([]);
+        return;
+      }
+      const tournaments = Object.values(data);
+      callback(tournaments);
+    },
+    (error) => {
+      console.error("Firebase tournaments subscription error:", error);
+      if (onError) {
+        onError(error);
+      } else {
+        callback([]);
+      }
+    }
+  );
+  return unsubscribe;
+}
+
+/**
+ * Update a specific bracket match (set matchId when scoring starts, winnerId when complete).
+ */
+export async function updateBracketMatch(tournamentId, roundIndex, matchPosition, updates) {
+  const tournament = await loadTournament(tournamentId);
+  if (!tournament) {
+    throw new Error(`Tournament ${tournamentId} not found`);
+  }
+
+  const rounds = tournament.rounds.map((r, ri) => {
+    if (ri !== roundIndex) return r;
+    return {
+      ...r,
+      matches: r.matches.map((m, mi) => {
+        if (mi !== matchPosition - 1) return m;
+        return { ...m, ...updates };
+      }),
+    };
+  });
+
+  await updateTournament(tournamentId, { rounds });
+}
