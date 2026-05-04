@@ -56,9 +56,10 @@ export async function removeMatch(id) {
 /**
  * Subscribe to ALL matches. Calls `callback(matches[])` whenever
  * any match is added, updated, or removed.
+ * Optionally calls `onError(error)` if the subscription fails.
  * Returns an unsubscribe function.
  */
-export function subscribeToMatches(callback) {
+export function subscribeToMatches(callback, onError) {
   const matchesRef = ref(db, "matches");
   const unsubscribe = onValue(
     matchesRef,
@@ -73,7 +74,11 @@ export function subscribeToMatches(callback) {
     },
     (error) => {
       console.error("Firebase subscription error:", error);
-      callback([]);
+      if (onError) {
+        onError(error);
+      } else {
+        callback([]);
+      }
     }
   );
   return unsubscribe;

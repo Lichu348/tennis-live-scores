@@ -138,6 +138,7 @@ function winGame(m, pi) {
     if (wins >= setsNeeded(m)) {
       m.status = "finished";
       m.winner = pi;
+      m.finishedAt = Date.now();
     } else {
       m.sets.push([0, 0]);
     }
@@ -148,7 +149,9 @@ function winGame(m, pi) {
 
   // Server rotation
   if (wasInTiebreak) {
-    m.server = m.tiebreakStartServer === 0 ? 1 : 0;
+    // The player who served last regular game (tiebreakStartServer) serves first in next set
+    // because the OTHER player served first in the tiebreak, and should now receive
+    m.server = m.tiebreakStartServer;
     m.tiebreakStartServer = null;
   } else {
     m.server = m.server === 0 ? 1 : 0;

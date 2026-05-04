@@ -15,19 +15,29 @@ export default function SpectatorMode({ onBack }) {
 
   /* Real-time subscription to all matches */
   useEffect(() => {
-    const unsub = subscribeToMatches((all) => {
-      setMatches(all);
-      setConnected(true);
-    });
-    // Mark as connected after first tick even if empty
-    const t = setTimeout(() => setConnected(true), 3000);
+    let hasReceivedData = false;
+    const unsub = subscribeToMatches(
+      (all) => {
+        setMatches(all);
+        hasReceivedData = true;
+        setConnected(true);
+      },
+      (error) => {
+        console.error("Subscription error:", error);
+        setConnected(false);
+      }
+    );
+    // Only mark as connected after timeout if we've received data
+    const t = setTimeout(() => {
+      if (!hasReceivedData) setConnected(false);
+    }, 5000);
     return () => { unsub(); clearTimeout(t); };
   }, []);
 
   const liveMatches = matches.filter(m => m.status === "live");
   const recentFinished = matches
     .filter(m => m.status === "finished")
-    .sort((a, b) => b.createdAt - a.createdAt)
+    .sort((a, b) => (b.finishedAt || b.createdAt) - (a.finishedAt || a.createdAt))
     .slice(0, 3);
   const allDisplay = [...liveMatches, ...recentFinished];
 

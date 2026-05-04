@@ -1,13 +1,35 @@
-import { useState } from "react";
-import { Undo2, ChevronLeft, CircleDot, Trophy } from "lucide-react";
+import { useState, useEffect } from "react";
+import { Undo2, ChevronLeft, CircleDot, Trophy, RefreshCw } from "lucide-react";
 import { createMatch, scorePoint, undoPoint, getPointDisplay, isDeuce, getAlerts } from "./scoring";
-import { saveMatch, removeMatch } from "./firebase";
+import { saveMatch, removeMatch, subscribeToMatches } from "./firebase";
 import ScoreTable from "./ScoreTable";
 import { S, COURT_COLORS } from "./styles";
 
 export default function UmpireMode({ onBack }) {
   const [match, setMatch] = useState(null);
   const [setup, setSetup] = useState({ p1: "", p2: "", court: 0, bestOf: 3 });
+  const [liveMatches, setLiveMatches] = useState([]);
+  const [showResume, setShowResume] = useState(false);
+
+  /* ─── Load existing live matches for resume ─── */
+  useEffect(() => {
+    const unsub = subscribeToMatches(
+      (all) => {
+        setLiveMatches(all.filter(m => m.status === "live"));
+      },
+      (error) => {
+        console.error("Failed to load matches:", error);
+      }
+    );
+    return unsub;
+  }, []);
+
+  /* ─── Resume existing match ─── */
+  const resumeMatch = (m) => {
+    // Restore with empty history (undo won't work for actions before resume)
+    setMatch({ ...m, history: [] });
+    setShowResume(false);
+  };
 
   /* ─── Start Match ─── */
   const startMatch = () => {
@@ -114,6 +136,42 @@ export default function UmpireMode({ onBack }) {
           }}>
             Start Match
           </button>
+
+          {/* Resume existing match */}
+          {liveMatches.length > 0 && (
+            <div style={{ marginTop: 24, paddingTop: 20, borderTop: `1px solid ${S.border}` }}>
+              <button onClick={() => setShowResume(!showResume)} style={{
+                display: "flex", alignItems: "center", gap: 8,
+                background: "none", border: "none", color: S.gold,
+                cursor: "pointer", fontSize: 14, fontFamily: "'Barlow', sans-serif",
+              }}>
+                <RefreshCw size={16} />
+                Resume existing match ({liveMatches.length})
+              </button>
+              {showResume && (
+                <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 8 }}>
+                  {liveMatches.map(m => {
+                    const cc = COURT_COLORS[m.courtIdx] || COURT_COLORS[0];
+                    return (
+                      <button key={m.id} onClick={() => resumeMatch(m)} style={{
+                        padding: "12px 16px", background: S.surface,
+                        border: `1px solid ${S.border}`, borderRadius: 10,
+                        cursor: "pointer", textAlign: "left",
+                      }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+                          <div style={{ width: 8, height: 8, borderRadius: "50%", background: cc.light }} />
+                          <span style={{ fontSize: 12, color: S.textDim }}>{cc.name}</span>
+                        </div>
+                        <div style={{ color: S.text, fontSize: 14, fontWeight: 500 }}>
+                          {m.players[0]} vs {m.players[1]}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
         </div>
       </div>
     );
