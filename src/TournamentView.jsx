@@ -5,11 +5,12 @@ import {
 } from "lucide-react";
 import {
   subscribeToTournament, subscribeToMatch, updateBracketMatch,
-  saveMatch, removeMatch, acquireLock, refreshLock, checkMatchLock
+  saveMatch, removeMatch, acquireLock, refreshLock, checkMatchLock,
+  updateTournament
 } from "./firebase";
 import {
   getEntryById, isMatchReady, advanceWinner, getTournamentProgress,
-  getMatchEntryNames
+  getMatchEntryNames, updateRoundRobinStandings
 } from "./drawGenerator";
 import {
   createMatch, scorePoint, undoPoint, getPointDisplay, isDeuce, getAlerts,
@@ -30,6 +31,9 @@ export default function TournamentView({ tournament: initialTournament, onBack }
   const [lockConflict, setLockConflict] = useState(null);
   const [showScoreAdjust, setShowScoreAdjust] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
+
+  // Pending resume - awaiting user confirmation before taking over locked match
+  const [pendingResume, setPendingResume] = useState(null);
 
   // Subscribe to tournament updates
   useEffect(() => {
@@ -130,37 +134,85 @@ export default function TournamentView({ tournament: initialTournament, onBack }
 
   /**
    * Resume an existing match from bracket.
+   * If the match is locked by another device, we prompt for confirmation first.
    */
   const handleResumeMatch = useCallback(async (roundIndex, matchPosition, matchId) => {
-    // Subscribe to get the match, then set it active
+    let isHandled = false; // Prevent double-handling from subscription
+
     const unsub = subscribeToMatch(matchId, (remoteMatch) => {
-      if (remoteMatch) {
-        const lock = checkMatchLock(remoteMatch);
+      if (!remoteMatch || isHandled) return;
 
-        if (lock && lock.isLocked && !lock.isStale) {
-          setLockConflict({
-            lockedBy: lock.lockedBy,
-            isStale: lock.isStale,
-            message: "This match is being scored by another device",
-          });
-        }
+      const lock = checkMatchLock(remoteMatch);
 
-        // Replay events if available
-        let restored;
-        if (remoteMatch.events && remoteMatch.events.length > 0) {
-          restored = replayEvents(remoteMatch);
-        } else {
-          restored = { ...remoteMatch, history: [], events: [] };
-        }
-
-        const lockedMatch = acquireLock(restored);
-        setActiveMatch(lockedMatch);
-        setActiveBracketPosition({ roundIndex, matchPosition });
-        saveMatch(lockedMatch);
-        setView("scoring");
+      // If locked by another device (non-stale), require confirmation
+      if (lock && lock.isLocked && !lock.isStale) {
+        isHandled = true;
+        setPendingResume({
+          roundIndex,
+          matchPosition,
+          matchId,
+          lockedBy: lock.lockedBy,
+        });
+        unsub();
+        return; // Don't acquire lock - wait for user confirmation
       }
+
+      // Not locked or stale lock - proceed normally
+      isHandled = true;
+      let restored;
+      if (remoteMatch.events && remoteMatch.events.length > 0) {
+        restored = replayEvents(remoteMatch);
+      } else {
+        restored = { ...remoteMatch, history: [], events: [] };
+      }
+
+      const lockedMatch = acquireLock(restored);
+      setActiveMatch(lockedMatch);
+      setActiveBracketPosition({ roundIndex, matchPosition });
+      saveMatch(lockedMatch);
+      setView("scoring");
       unsub();
     });
+  }, []);
+
+  /**
+   * Confirm taking over a locked match (after user explicitly approves).
+   * Re-fetches latest match state to avoid using stale data.
+   */
+  const handleConfirmTakeover = useCallback(() => {
+    if (!pendingResume) return;
+
+    const { roundIndex, matchPosition, matchId } = pendingResume;
+
+    // Re-fetch latest match state before takeover
+    const unsub = subscribeToMatch(matchId, (remoteMatch) => {
+      if (!remoteMatch) {
+        unsub();
+        return;
+      }
+
+      let restored;
+      if (remoteMatch.events && remoteMatch.events.length > 0) {
+        restored = replayEvents(remoteMatch);
+      } else {
+        restored = { ...remoteMatch, history: [], events: [] };
+      }
+
+      const lockedMatch = acquireLock(restored);
+      setActiveMatch(lockedMatch);
+      setActiveBracketPosition({ roundIndex, matchPosition });
+      saveMatch(lockedMatch);
+      setPendingResume(null);
+      setView("scoring");
+      unsub();
+    });
+  }, [pendingResume]);
+
+  /**
+   * Cancel takeover - dismiss the confirmation dialog.
+   */
+  const handleCancelTakeover = useCallback(() => {
+    setPendingResume(null);
   }, []);
 
   /**
@@ -198,7 +250,7 @@ export default function TournamentView({ tournament: initialTournament, onBack }
   };
 
   /**
-   * Handle match completion - update bracket and advance winner.
+   * Handle match completion - update bracket/standings based on tournament format.
    */
   const handleMatchFinished = useCallback((match) => {
     if (!activeBracketPosition || !tournament) return;
@@ -208,7 +260,33 @@ export default function TournamentView({ tournament: initialTournament, onBack }
     // Determine winner entry ID
     const winnerEntryId = match.winner === 0 ? match.entry1Id : match.entry2Id;
 
-    // Update bracket with winner
+    // Handle round-robin differently - update standings only, don't touch other fixtures
+    if (tournament.format === "round_robin") {
+      // Calculate sets and games from the match scores
+      const entry1Sets = match.sets.filter(s => s[0] > s[1]).length;
+      const entry2Sets = match.sets.filter(s => s[1] > s[0]).length;
+      const entry1Games = match.sets.reduce((sum, s) => sum + s[0], 0);
+      const entry2Games = match.sets.reduce((sum, s) => sum + s[1], 0);
+
+      // Update standings (returns new tournament with updated standings)
+      const updatedTournament = updateRoundRobinStandings(tournament, roundIndex, matchPosition, {
+        entry1Sets,
+        entry2Sets,
+        entry1Games,
+        entry2Games,
+      });
+
+      // Persist updated standings to Firebase
+      updateTournament(tournament.id, { standings: updatedTournament.standings });
+
+      // Only update this specific match with winnerId - don't touch other matches
+      updateBracketMatch(tournament.id, roundIndex, matchPosition, {
+        winnerId: winnerEntryId,
+      });
+      return;
+    }
+
+    // Single elimination (knockout) - advance winner to next round
     const updated = advanceWinner(tournament, roundIndex, matchPosition, winnerEntryId);
 
     // Save to Firebase
@@ -522,6 +600,52 @@ export default function TournamentView({ tournament: initialTournament, onBack }
         <RoundRobinView tournament={tournament} onStartMatch={handleStartMatch} onResumeMatch={handleResumeMatch} />
       ) : (
         <BracketView tournament={tournament} onStartMatch={handleStartMatch} onResumeMatch={handleResumeMatch} />
+      )}
+
+      {/* Lock Takeover Confirmation Modal */}
+      {pendingResume && (
+        <div style={{
+          position: "fixed", inset: 0, background: "rgba(0,0,0,0.8)",
+          display: "flex", alignItems: "center", justifyContent: "center",
+          zIndex: 1000, padding: 20,
+        }}>
+          <div style={{
+            background: S.surface, borderRadius: 16, padding: 24,
+            maxWidth: 360, width: "100%", border: `1px solid ${S.border}`,
+          }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16 }}>
+              <AlertTriangle size={24} color={S.gold} />
+              <div style={{
+                fontFamily: "'Oswald', sans-serif", fontSize: 18,
+                fontWeight: 600, color: S.text, textTransform: "uppercase",
+              }}>
+                Match In Progress
+              </div>
+            </div>
+            <p style={{ color: S.textDim, fontSize: 14, marginBottom: 20, lineHeight: 1.5 }}>
+              This match is currently being scored by <strong style={{ color: S.text }}>{pendingResume.lockedBy}</strong>.
+              Taking over will disconnect their session.
+            </p>
+            <div style={{ display: "flex", gap: 12 }}>
+              <button onClick={handleCancelTakeover} style={{
+                flex: 1, padding: "12px 16px", borderRadius: 8,
+                background: S.surfaceLight, border: `1px solid ${S.border}`,
+                color: S.text, fontSize: 14, cursor: "pointer",
+                fontFamily: "'Barlow', sans-serif",
+              }}>
+                Cancel
+              </button>
+              <button onClick={handleConfirmTakeover} style={{
+                flex: 1, padding: "12px 16px", borderRadius: 8,
+                background: S.gold, border: "none",
+                color: S.bg, fontSize: 14, fontWeight: 600, cursor: "pointer",
+                fontFamily: "'Barlow', sans-serif",
+              }}>
+                Take Over
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

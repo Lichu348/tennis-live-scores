@@ -44,6 +44,9 @@ export function createMatch(p1OrPlayers, p2, courtIdx, bestOf, options = {}) {
     players = [p1OrPlayers, p2];
   }
 
+  // Extract tournament metadata from options (if present)
+  const { tournamentId, bracketRound, bracketPosition } = options;
+
   return {
     id: `m-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
     matchType,
@@ -62,6 +65,10 @@ export function createMatch(p1OrPlayers, p2, courtIdx, bestOf, options = {}) {
     history: [],              // Local undo history (React state only)
     events: [],               // Persistent event log (saved to Firebase)
     createdAt: Date.now(),
+    // Tournament metadata (if this match belongs to a tournament)
+    ...(tournamentId && { tournamentId }),
+    ...(bracketRound !== undefined && { bracketRound }),
+    ...(bracketPosition !== undefined && { bracketPosition }),
   };
 }
 
@@ -176,6 +183,8 @@ export function replayEvents(match, stopAtIndex) {
           event.sets[event.sets.length - 1][0] === 6 &&
           event.sets[event.sets.length - 1][1] === 6,
         history: [], // Clear history after adjustment
+        // Restore doubles server order if present in event
+        ...(event.doublesServerOrder && { doublesServerOrder: [...event.doublesServerOrder] }),
       };
       // Set tiebreakStartServer if entering tiebreak
       if (current.isTiebreak) {
@@ -778,6 +787,39 @@ export function setScore(match, sets, points, server) {
   const currentSetScore = normalizedSets[normalizedSets.length - 1] || [0, 0];
   const isTiebreak = currentSetScore[0] === 6 && currentSetScore[1] === 6;
 
+  // Calculate doublesServerOrder based on total games played
+  // The order depends on which team's turn it is and which player within that team
+  let doublesServerOrder = null;
+  if (match.matchType === 'doubles' || match.players?.length === 4) {
+    // Calculate total games to figure out where we are in rotation
+    let totalGames = 0;
+    for (const [g1, g2] of normalizedSets) {
+      totalGames += g1 + g2;
+    }
+    // Standard rotation: 0 → 2 → 1 → 3
+    // After game N, the next server is doublesOrder[(N) % 4]
+    // doublesServerOrder tracks which player (0 or 1 within team) serves NEXT for each team
+    // We need to reverse-engineer this from the current position
+    const doublesOrder = [0, 2, 1, 3];
+    const currentServerIdx = totalGames % 4;
+    const currentServer = doublesOrder[currentServerIdx];
+
+    // For each team, figure out which player should serve next
+    // Team 0: players 0, 1; Team 1: players 2, 3
+    // The current server just finished their game, so next time their team serves,
+    // it should be the OTHER player on that team
+    doublesServerOrder = [0, 0]; // Default: player 0 of each team serves next
+
+    // Look at the last time each team served to figure out the next server
+    for (let i = 0; i < totalGames; i++) {
+      const serverIdx = doublesOrder[i % 4];
+      const team = serverIdx < 2 ? 0 : 1;
+      const playerInTeam = serverIdx - team * 2;
+      // After this player serves, the next server for this team is the other player
+      doublesServerOrder[team] = 1 - playerInTeam;
+    }
+  }
+
   // Create the new match state
   const newMatch = {
     ...match,
@@ -786,6 +828,7 @@ export function setScore(match, sets, points, server) {
     isTiebreak,
     tiebreakStartServer: isTiebreak ? calculateServer(normalizedSets.slice(0, -1).concat([[6, 5]]), false, 0) : null,
     server: server !== undefined ? server : calculateServer(normalizedSets, isTiebreak, isTiebreak ? (points[0] + points[1]) : 0),
+    doublesServerOrder,
     status: "live",
     winner: null,
     history: [], // Clear history - can't undo past the jump
@@ -796,6 +839,7 @@ export function setScore(match, sets, points, server) {
         sets: normalizedSets,
         points: points || [0, 0],
         server,
+        doublesServerOrder, // Include for doubles replay
         timestamp: Date.now(),
         index: 0,
       },
