@@ -3,7 +3,7 @@ import {
   Monitor, ChevronLeft, Wifi, WifiOff, RefreshCw,
   Maximize2, Minimize2, Trophy, AlertTriangle,
 } from "lucide-react";
-import { getPointDisplay, isDeuce, getAlerts } from "./scoring";
+import { getPointDisplay, isDeuce, getAlerts, isDoubles, getTeamDisplayName } from "./scoring";
 import { subscribeToMatches } from "./firebase";
 import ScoreTable from "./ScoreTable";
 import { S, COURT_COLORS } from "./styles";

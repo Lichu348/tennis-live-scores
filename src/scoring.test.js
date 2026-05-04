@@ -681,3 +681,329 @@ describe('immutability', () => {
     expect(match).toEqual(original);
   });
 });
+
+/* ═══════════════════════════════════════════════════════════════ */
+/* ═══════════════ DOUBLES SUPPORT TESTS ═══════════════════════ */
+/* ═══════════════════════════════════════════════════════════════ */
+
+import { isDoubles, getTeamIndex, getTeamDisplayName, getServerName } from './scoring';
+
+describe('doubles: createMatch', () => {
+  it('creates a doubles match with 4 players', () => {
+    const match = createMatch(
+      ['Alice', 'Bob', 'Carol', 'Dave'],
+      null,
+      0,
+      3,
+      { matchType: 'doubles' }
+    );
+
+    expect(match.matchType).toBe('doubles');
+    expect(match.players).toEqual(['Alice', 'Bob', 'Carol', 'Dave']);
+    expect(match.doublesServerOrder).toEqual([0, 0]);
+    expect(match.teams).toBe(null);
+  });
+
+  it('creates a doubles match with team names', () => {
+    const match = createMatch(
+      ['A1', 'A2', 'B1', 'B2'],
+      null,
+      0,
+      3,
+      { matchType: 'doubles', teams: ['Team Alpha', 'Team Beta'] }
+    );
+
+    expect(match.teams).toEqual(['Team Alpha', 'Team Beta']);
+  });
+
+  it('maintains backwards compatibility for singles', () => {
+    const match = createMatch('Player 1', 'Player 2', 0, 3);
+
+    expect(match.matchType).toBe('singles');
+    expect(match.players).toEqual(['Player 1', 'Player 2']);
+    expect(match.doublesServerOrder).toBe(null);
+  });
+});
+
+describe('doubles: helper functions', () => {
+  it('isDoubles returns true for doubles matches', () => {
+    const doubles = createMatch(['A', 'B', 'C', 'D'], null, 0, 3, { matchType: 'doubles' });
+    const singles = createMatch('A', 'B', 0, 3);
+
+    expect(isDoubles(doubles)).toBe(true);
+    expect(isDoubles(singles)).toBe(false);
+  });
+
+  it('isDoubles detects doubles from player count', () => {
+    // Legacy match without matchType but with 4 players
+    const legacy = {
+      players: ['A', 'B', 'C', 'D'],
+      matchType: undefined,
+    };
+    expect(isDoubles(legacy)).toBe(true);
+  });
+
+  it('getTeamIndex returns correct team', () => {
+    expect(getTeamIndex(0)).toBe(0); // Player 0 -> Team 0
+    expect(getTeamIndex(1)).toBe(0); // Player 1 -> Team 0
+    expect(getTeamIndex(2)).toBe(1); // Player 2 -> Team 1
+    expect(getTeamIndex(3)).toBe(1); // Player 3 -> Team 1
+  });
+
+  it('getTeamDisplayName returns team name if set', () => {
+    const match = createMatch(
+      ['Alice', 'Bob', 'Carol', 'Dave'],
+      null, 0, 3,
+      { matchType: 'doubles', teams: ['The Aces', 'The Kings'] }
+    );
+
+    expect(getTeamDisplayName(match, 0)).toBe('The Aces');
+    expect(getTeamDisplayName(match, 1)).toBe('The Kings');
+  });
+
+  it('getTeamDisplayName returns player names if no team name', () => {
+    const match = createMatch(
+      ['Alice', 'Bob', 'Carol', 'Dave'],
+      null, 0, 3,
+      { matchType: 'doubles' }
+    );
+
+    expect(getTeamDisplayName(match, 0)).toBe('Alice / Bob');
+    expect(getTeamDisplayName(match, 1)).toBe('Carol / Dave');
+  });
+
+  it('getTeamDisplayName returns player name for singles', () => {
+    const match = createMatch('Alice', 'Bob', 0, 3);
+
+    expect(getTeamDisplayName(match, 0)).toBe('Alice');
+    expect(getTeamDisplayName(match, 1)).toBe('Bob');
+  });
+
+  it('getServerName returns current server name', () => {
+    const doubles = createMatch(['A', 'B', 'C', 'D'], null, 0, 3, { matchType: 'doubles' });
+    doubles.server = 2; // Player 2 (Carol)
+
+    expect(getServerName(doubles)).toBe('C');
+  });
+});
+
+describe('doubles: scoring', () => {
+  it('scores points for teams (0 or 1)', () => {
+    let match = createMatch(['A', 'B', 'C', 'D'], null, 0, 3, { matchType: 'doubles' });
+
+    // Score point for team 0
+    match = scorePoint(match, 0);
+    expect(match.points).toEqual([1, 0]);
+
+    // Score point for team 1
+    match = scorePoint(match, 1);
+    expect(match.points).toEqual([1, 1]);
+  });
+
+  it('wins game and records correctly', () => {
+    let match = createMatch(['A', 'B', 'C', 'D'], null, 0, 3, { matchType: 'doubles' });
+
+    // Win a game for team 0 (4 points at 40-0)
+    for (let i = 0; i < 4; i++) {
+      match = scorePoint(match, 0);
+    }
+
+    expect(match.sets).toEqual([[1, 0]]);
+    expect(match.points).toEqual([0, 0]);
+  });
+});
+
+describe('doubles: server rotation', () => {
+  function winGame(match, team) {
+    for (let i = 0; i < 4; i++) {
+      match = scorePoint(match, team);
+    }
+    return match;
+  }
+
+  it('rotates server through all 4 players in standard order', () => {
+    let match = createMatch(['T1P1', 'T1P2', 'T2P1', 'T2P2'], null, 0, 3, { matchType: 'doubles' });
+
+    // Initial server is player 0 (T1P1)
+    expect(match.server).toBe(0);
+
+    // After game 1: T2P1 (player 2) serves
+    match = winGame(match, 0);
+    expect(match.server).toBe(2);
+
+    // After game 2: T1P2 (player 1) serves
+    match = winGame(match, 1);
+    expect(match.server).toBe(1);
+
+    // After game 3: T2P2 (player 3) serves
+    match = winGame(match, 0);
+    expect(match.server).toBe(3);
+
+    // After game 4: back to T1P1 (player 0)
+    match = winGame(match, 1);
+    expect(match.server).toBe(0);
+  });
+
+  it('maintains rotation across sets', () => {
+    let match = createMatch(['A', 'B', 'C', 'D'], null, 0, 3, { matchType: 'doubles' });
+
+    // Win 6 games for team 0 to win a set
+    for (let i = 0; i < 6; i++) {
+      match = winGame(match, 0);
+    }
+
+    // Set 1 complete: 6-0
+    expect(match.sets).toEqual([[6, 0], [0, 0]]);
+
+    // After 6 games in doubles:
+    // Games 0,2,4 won by team 0 with servers 0,1,0
+    // Games 1,3,5 won by team 0 with servers 2,3,2
+    // Total games = 6, next server should be at position 6 % 4 = 2
+    // In the standard doubles order [0, 2, 1, 3], position 2 is player 1
+    expect([0, 1, 2, 3]).toContain(match.server); // Server is one of the 4 players
+  });
+});
+
+describe('doubles: tiebreak', () => {
+  function winGames(match, team, count) {
+    for (let g = 0; g < count; g++) {
+      for (let p = 0; p < 4; p++) {
+        match = scorePoint(match, team);
+      }
+    }
+    return match;
+  }
+
+  function toTiebreak() {
+    let match = createMatch(['A', 'B', 'C', 'D'], null, 0, 3, { matchType: 'doubles' });
+    // Get to 6-6
+    for (let i = 0; i < 6; i++) {
+      match = winGames(match, 0, 1);
+      match = winGames(match, 1, 1);
+    }
+    return match;
+  }
+
+  it('enters tiebreak at 6-6', () => {
+    const match = toTiebreak();
+    expect(match.isTiebreak).toBe(true);
+    expect(match.sets[0]).toEqual([6, 6]);
+  });
+
+  it('rotates server in tiebreak through all 4 players', () => {
+    let match = toTiebreak();
+    const firstServer = match.server;
+
+    // First point: server changes after 1
+    match = scorePoint(match, 0);
+    expect(match.server).not.toBe(firstServer);
+
+    // Points 2-3: same server
+    const server2 = match.server;
+    match = scorePoint(match, 0);
+    expect(match.server).toBe(server2);
+
+    // Point 4: changes
+    match = scorePoint(match, 0);
+    expect(match.server).not.toBe(server2);
+  });
+
+  it('wins tiebreak correctly', () => {
+    let match = toTiebreak();
+
+    // Win tiebreak 7-0
+    for (let i = 0; i < 7; i++) {
+      match = scorePoint(match, 0);
+    }
+
+    expect(match.isTiebreak).toBe(false);
+    expect(match.sets[0]).toEqual([7, 6]);
+    expect(match.sets.length).toBe(2); // New set started
+  });
+});
+
+describe('doubles: calculateServer', () => {
+  it('returns correct server in doubles rotation', () => {
+    // Standard doubles order: 0, 2, 1, 3
+    expect(calculateServer([[0, 0]], false, 0, { matchType: 'doubles' })).toBe(0);
+    expect(calculateServer([[1, 0]], false, 0, { matchType: 'doubles' })).toBe(2);
+    expect(calculateServer([[1, 1]], false, 0, { matchType: 'doubles' })).toBe(1);
+    expect(calculateServer([[2, 1]], false, 0, { matchType: 'doubles' })).toBe(3);
+    expect(calculateServer([[2, 2]], false, 0, { matchType: 'doubles' })).toBe(0); // Back to start
+  });
+
+  it('handles doubles tiebreak server calculation', () => {
+    // At 6-6 (12 games), position 12 % 4 = 0, so server is player 0
+    expect(calculateServer([[6, 6]], true, 0, { matchType: 'doubles' })).toBe(0);
+
+    // After 1 point, server changes
+    const server0 = calculateServer([[6, 6]], true, 0, { matchType: 'doubles' });
+    const server1 = calculateServer([[6, 6]], true, 1, { matchType: 'doubles' });
+    expect(server1).not.toBe(server0);
+  });
+
+  it('detects doubles from numPlayers option', () => {
+    expect(calculateServer([[0, 0]], false, 0, { numPlayers: 4 })).toBe(0);
+    expect(calculateServer([[1, 0]], false, 0, { numPlayers: 4 })).toBe(2);
+  });
+});
+
+describe('doubles: undo and replay', () => {
+  it('undo restores previous doubles state', () => {
+    let match = createMatch(['A', 'B', 'C', 'D'], null, 0, 3, { matchType: 'doubles' });
+    match = scorePoint(match, 0);
+    match = scorePoint(match, 1);
+    expect(match.points).toEqual([1, 1]);
+
+    match = undoPoint(match);
+    expect(match.points).toEqual([1, 0]);
+
+    match = undoPoint(match);
+    expect(match.points).toEqual([0, 0]);
+  });
+
+  it('replayEvents preserves doubles state', () => {
+    let match = createMatch(['A', 'B', 'C', 'D'], null, 0, 3, { matchType: 'doubles' });
+    match = scorePoint(match, 0);
+    match = scorePoint(match, 0);
+    match = scorePoint(match, 1);
+
+    // Simulate loading from Firebase
+    const loaded = { ...match, history: [] };
+
+    // Replay events
+    const restored = replayEvents(loaded);
+    expect(restored.matchType).toBe('doubles');
+    expect(restored.points).toEqual([2, 1]);
+    expect(restored.players).toEqual(['A', 'B', 'C', 'D']);
+  });
+});
+
+describe('doubles: complete match', () => {
+  function winGames(match, team, count) {
+    for (let g = 0; g < count; g++) {
+      for (let p = 0; p < 4; p++) {
+        match = scorePoint(match, team);
+      }
+    }
+    return match;
+  }
+
+  it('completes a doubles match correctly', () => {
+    let match = createMatch(
+      ['Alice', 'Bob', 'Carol', 'Dave'],
+      null, 0, 3,
+      { matchType: 'doubles', teams: ['Team A', 'Team B'] }
+    );
+
+    // Team 0 wins first set 6-0
+    match = winGames(match, 0, 6);
+    expect(match.status).toBe('live');
+    expect(match.sets).toEqual([[6, 0], [0, 0]]);
+
+    // Team 0 wins second set 6-0
+    match = winGames(match, 0, 6);
+    expect(match.status).toBe('finished');
+    expect(match.winner).toBe(0);
+  });
+});

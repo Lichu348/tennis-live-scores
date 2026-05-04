@@ -1,5 +1,5 @@
 import { Trophy } from "lucide-react";
-import { getPointDisplay, isDeuce } from "./scoring";
+import { getPointDisplay, isDeuce, isDoubles, getTeamDisplayName, getServerName } from "./scoring";
 import { S } from "./styles";
 
 export default function ScoreTable({ match, compact, large }) {
@@ -41,16 +41,29 @@ export default function ScoreTable({ match, compact, large }) {
           const isWinner = match.status === "finished" && match.winner === pi;
           return (
             <tr key={pi} style={{ borderTop: pi === 1 ? `1px solid ${S.border}` : "none" }}>
-              {/* Player name */}
+              {/* Player/Team name */}
               <td style={{ padding: pad, display: "flex", alignItems: "center", gap: 6 }}>
-                {match.server === pi && match.status === "live" && (
-                  <div style={{
-                    width: compact ? 6 : 8,
-                    height: compact ? 6 : 8,
-                    borderRadius: "50%",
-                    background: S.goldBright,
-                    flexShrink: 0,
-                  }} />
+                {/* Server indicator: for doubles, check if current server's team matches */}
+                {match.status === "live" && (
+                  isDoubles(match)
+                    ? (pi === 0 ? match.server < 2 : match.server >= 2) && (
+                        <div style={{
+                          width: compact ? 6 : 8,
+                          height: compact ? 6 : 8,
+                          borderRadius: "50%",
+                          background: S.goldBright,
+                          flexShrink: 0,
+                        }} />
+                      )
+                    : match.server === pi && (
+                        <div style={{
+                          width: compact ? 6 : 8,
+                          height: compact ? 6 : 8,
+                          borderRadius: "50%",
+                          background: S.goldBright,
+                          flexShrink: 0,
+                        }} />
+                      )
                 )}
                 {isWinner && <Trophy size={compact ? 12 : 16} color={S.gold} style={{ flexShrink: 0 }} />}
                 <span style={{
@@ -63,10 +76,10 @@ export default function ScoreTable({ match, compact, large }) {
                   whiteSpace: "nowrap",
                   overflow: "hidden",
                   textOverflow: "ellipsis",
-                  maxWidth: large ? 240 : compact ? 120 : 160,
+                  maxWidth: large ? 280 : compact ? 140 : 180,
                   display: "inline-block",
                 }}>
-                  {match.players[pi]}
+                  {getTeamDisplayName(match, pi)}
                 </span>
               </td>
 

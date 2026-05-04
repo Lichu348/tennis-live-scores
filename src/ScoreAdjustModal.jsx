@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { X, AlertCircle, Check } from "lucide-react";
-import { parseScoreString, validateScore, calculateServer, setScore, POINT_NAMES } from "./scoring";
+import { parseScoreString, validateScore, calculateServer, setScore, POINT_NAMES, isDoubles, getTeamDisplayName, getTeamIndex } from "./scoring";
 import { S } from "./styles";
 
 /**
@@ -62,14 +62,22 @@ export default function ScoreAdjustModal({ match, onSubmit, onCancel }) {
     if (sets) {
       const currentSet = sets[sets.length - 1] || [0, 0];
       const isTiebreak = currentSet[0] === 6 && currentSet[1] === 6;
+      const options = isDoubles(match) ? { matchType: 'doubles' } : {};
       const autoServer = calculateServer(
         sets,
         isTiebreak,
-        isTiebreak ? (points[0] + points[1]) : 0
+        isTiebreak ? (points[0] + points[1]) : 0,
+        options
       );
       setServer(autoServer);
     }
   };
+
+  // Get server options based on match type
+  const isDoublesMatch = isDoubles(match);
+  const serverOptions = isDoublesMatch
+    ? [0, 1, 2, 3] // All 4 players
+    : [0, 1];      // 2 players for singles
 
   // Point options for dropdown
   const pointOptions = match.isTiebreak || (
@@ -123,16 +131,19 @@ export default function ScoreAdjustModal({ match, onSubmit, onCancel }) {
           <div style={{ marginBottom: 20 }}>
             <div style={labelStyle}>Current Game Points</div>
             <div style={{ display: "flex", gap: 16, marginTop: 8 }}>
-              {[0, 1].map(pi => (
-                <div key={pi} style={{ flex: 1 }}>
-                  <div style={{ fontSize: 12, color: S.textDim, marginBottom: 4 }}>
-                    {match.players[pi]}
+              {[0, 1].map(teamIdx => (
+                <div key={teamIdx} style={{ flex: 1 }}>
+                  <div style={{
+                    fontSize: 12, color: S.textDim, marginBottom: 4,
+                    overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                  }}>
+                    {getTeamDisplayName(match, teamIdx)}
                   </div>
                   <select
-                    value={points[pi]}
+                    value={points[teamIdx]}
                     onChange={e => {
                       const newPoints = [...points];
-                      newPoints[pi] = parseInt(e.target.value, 10);
+                      newPoints[teamIdx] = parseInt(e.target.value, 10);
                       setPoints(newPoints);
                     }}
                     style={selectStyle}
@@ -157,22 +168,33 @@ export default function ScoreAdjustModal({ match, onSubmit, onCancel }) {
                 Auto-calculate
               </button>
             </div>
-            <div style={{ display: "flex", gap: 12, marginTop: 8 }}>
-              {[0, 1].map(pi => (
+            <div style={{
+              display: "grid",
+              gridTemplateColumns: isDoublesMatch ? "1fr 1fr" : "1fr 1fr",
+              gap: 8,
+              marginTop: 8,
+            }}>
+              {serverOptions.map(playerIdx => (
                 <button
-                  key={pi}
+                  key={playerIdx}
                   type="button"
-                  onClick={() => setServer(pi)}
+                  onClick={() => setServer(playerIdx)}
                   style={{
-                    flex: 1, padding: "12px 16px", borderRadius: 8,
-                    border: server === pi ? `2px solid ${S.goldBright}` : `1px solid ${S.border}`,
-                    background: server === pi ? "#2a2010" : S.surfaceLight,
-                    color: server === pi ? S.goldBright : S.text,
-                    cursor: "pointer", fontSize: 14,
+                    padding: "12px 16px", borderRadius: 8,
+                    border: server === playerIdx ? `2px solid ${S.goldBright}` : `1px solid ${S.border}`,
+                    background: server === playerIdx ? "#2a2010" : S.surfaceLight,
+                    color: server === playerIdx ? S.goldBright : S.text,
+                    cursor: "pointer", fontSize: 13,
                     fontFamily: "'Barlow', sans-serif",
+                    textAlign: "center",
                   }}
                 >
-                  {match.players[pi]}
+                  {match.players[playerIdx]}
+                  {isDoublesMatch && (
+                    <div style={{ fontSize: 10, color: S.textDim, marginTop: 2 }}>
+                      Team {getTeamIndex(playerIdx) + 1}
+                    </div>
+                  )}
                 </button>
               ))}
             </div>

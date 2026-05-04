@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { ChevronLeft, Trash2, Clock, AlertTriangle, CheckCircle } from "lucide-react";
 import { subscribeToMatches, removeMatch, deleteOldMatches } from "./firebase";
+import { isDoubles, getTeamDisplayName } from "./scoring";
 import { S, COURT_COLORS } from "./styles";
 
 export default function AdminMode({ onBack }) {
@@ -241,6 +242,14 @@ export default function AdminMode({ onBack }) {
                     background: isLive ? S.greenBright : S.textDim,
                   }} />
                   <span style={{ fontSize: 12, color: S.textDim }}>{cc.name}</span>
+                  {isDoubles(match) && (
+                    <span style={{
+                      fontSize: 10, padding: "2px 6px", borderRadius: 4,
+                      background: S.surfaceLight, color: S.textDim,
+                    }}>
+                      Doubles
+                    </span>
+                  )}
                   <span style={{
                     fontSize: 10, padding: "2px 6px", borderRadius: 4,
                     background: isLive ? S.greenBright + "22" : S.surfaceLight,
@@ -251,7 +260,7 @@ export default function AdminMode({ onBack }) {
                   </span>
                 </div>
                 <div style={{ color: S.text, fontWeight: 500, marginBottom: 2 }}>
-                  {match.players[0]} vs {match.players[1]}
+                  {getTeamDisplayName(match, 0)} vs {getTeamDisplayName(match, 1)}
                 </div>
                 <div style={{ fontSize: 13, color: S.textDim }}>
                   {score} · {formatDate(match.finishedAt || match.createdAt)}

@@ -16,21 +16,51 @@ function snapshot(m) {
 
 /* ─── Factory ─── */
 
-export function createMatch(p1, p2, courtIdx, bestOf) {
+/**
+ * Create a new match.
+ *
+ * For singles: players = [player1, player2]
+ * For doubles: players = [team1Player1, team1Player2, team2Player1, team2Player2]
+ *
+ * @param {string|string[]} p1OrPlayers - Player 1 name (singles) or array of all players (doubles)
+ * @param {string} p2 - Player 2 name (singles only)
+ * @param {number} courtIdx - Court index
+ * @param {number} bestOf - Best of 3 or 5
+ * @param {object} options - Optional: { matchType: 'singles'|'doubles', teams: [team1Name, team2Name] }
+ */
+export function createMatch(p1OrPlayers, p2, courtIdx, bestOf, options = {}) {
+  const matchType = options.matchType || 'singles';
+  const isDoubles = matchType === 'doubles';
+
+  let players;
+  let teams = null;
+
+  if (isDoubles && Array.isArray(p1OrPlayers)) {
+    // Doubles: p1OrPlayers is [t1p1, t1p2, t2p1, t2p2]
+    players = p1OrPlayers;
+    teams = options.teams || null;
+  } else {
+    // Singles: p1OrPlayers is player1 name, p2 is player2 name
+    players = [p1OrPlayers, p2];
+  }
+
   return {
     id: `m-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-    players: [p1, p2],
+    matchType,
+    players,
+    teams,                    // Optional team names for doubles: ["Team 1", "Team 2"]
     courtIdx,
     bestOf,
     sets: [[0, 0]],
     points: [0, 0],
     isTiebreak: false,
     tiebreakStartServer: null,
-    server: 0,
+    server: 0,                // For singles: 0 or 1. For doubles: 0-3 (player index)
+    doublesServerOrder: isDoubles ? [0, 0] : null, // [team1NextServer, team2NextServer] - 0 or 1 within team
     status: "live",
     winner: null,
-    history: [],       // Local undo history (React state only)
-    events: [],        // Persistent event log (saved to Firebase)
+    history: [],              // Local undo history (React state only)
+    events: [],               // Persistent event log (saved to Firebase)
     createdAt: Date.now(),
   };
 }
@@ -39,10 +69,13 @@ export function createMatch(p1, p2, courtIdx, bestOf) {
  * Create a base match state (no events applied) from match config.
  * Used by replayEvents to start from a clean slate.
  */
-export function createBaseMatch(players, courtIdx, bestOf, id, createdAt) {
+export function createBaseMatch(players, courtIdx, bestOf, id, createdAt, matchType = 'singles', teams = null) {
+  const isDoubles = matchType === 'doubles' || players.length === 4;
   return {
     id,
+    matchType: isDoubles ? 'doubles' : 'singles',
     players,
+    teams,
     courtIdx,
     bestOf,
     sets: [[0, 0]],
@@ -50,12 +83,56 @@ export function createBaseMatch(players, courtIdx, bestOf, id, createdAt) {
     isTiebreak: false,
     tiebreakStartServer: null,
     server: 0,
+    doublesServerOrder: isDoubles ? [0, 0] : null,
     status: "live",
     winner: null,
     history: [],
     events: [],
     createdAt,
   };
+}
+
+/**
+ * Check if a match is doubles.
+ */
+export function isDoubles(match) {
+  return match.matchType === 'doubles' || match.players?.length === 4;
+}
+
+/**
+ * Get team index (0 or 1) from player index in doubles.
+ * Players 0-1 are team 0, players 2-3 are team 1.
+ */
+export function getTeamIndex(playerIndex) {
+  return playerIndex < 2 ? 0 : 1;
+}
+
+/**
+ * Get display name for a team in doubles.
+ * Returns team name if set, otherwise "Player1 / Player2"
+ */
+export function getTeamDisplayName(match, teamIndex) {
+  if (!isDoubles(match)) {
+    return match.players[teamIndex] || '';
+  }
+
+  if (match.teams && match.teams[teamIndex]) {
+    return match.teams[teamIndex];
+  }
+
+  const p1Idx = teamIndex * 2;
+  const p2Idx = teamIndex * 2 + 1;
+  return `${match.players[p1Idx]} / ${match.players[p2Idx]}`;
+}
+
+/**
+ * Get the name of the current server in doubles.
+ */
+export function getServerName(match) {
+  if (!isDoubles(match)) {
+    return match.players[match.server];
+  }
+  return match.players[match.server];
 }
 
 /**
@@ -70,7 +147,9 @@ export function replayEvents(match, stopAtIndex) {
     match.courtIdx,
     match.bestOf,
     match.id,
-    match.createdAt
+    match.createdAt,
+    match.matchType,
+    match.teams
   );
 
   const events = match.events || [];
@@ -118,6 +197,8 @@ export function replayEvents(match, stopAtIndex) {
 /**
  * Internal scoring function that doesn't record events.
  * Used by replayEvents and scorePoint.
+ *
+ * For doubles: pi is the TEAM index (0 or 1), not player index.
  */
 function scorePointInternal(m, pi) {
   if (m.status !== "live") return m;
@@ -129,7 +210,8 @@ function scorePointInternal(m, pi) {
     next.points[pi]++;
     const total = next.points[0] + next.points[1];
     if (total % 2 === 1) {
-      next.server = next.server === 0 ? 1 : 0;
+      // Switch server in tiebreak
+      next.server = getNextTiebreakServer(next);
     }
     if (next.points[pi] >= 7 && next.points[pi] - next.points[oi] >= 2) {
       winGame(next, pi);
@@ -151,6 +233,61 @@ function scorePointInternal(m, pi) {
     }
   }
   return next;
+}
+
+/**
+ * Get the next server after a tiebreak point.
+ * For singles: alternates after 1st point, then every 2 points.
+ * For doubles: rotates through all 4 players.
+ */
+function getNextTiebreakServer(match) {
+  const total = match.points[0] + match.points[1];
+
+  if (!isDoubles(match)) {
+    // Singles: just flip between 0 and 1
+    return match.server === 0 ? 1 : 0;
+  }
+
+  // Doubles tiebreak rotation:
+  // After 1st point, then every 2 points, rotate to next player
+  // Order: T1P1 → T2P1 → T1P2 → T2P2 → repeat
+  // (or whatever the starting rotation was)
+
+  // The tiebreakStartServer tells us who served first in the tiebreak
+  const firstServer = match.tiebreakStartServer;
+
+  // Calculate how many server changes have occurred
+  // First point = 0 changes, points 2-3 = 1 change, points 4-5 = 2 changes, etc.
+  const serverChanges = Math.floor((total + 1) / 2);
+
+  // Build the doubles rotation starting from the first server
+  const rotation = getDoublesServerRotation(firstServer);
+  return rotation[serverChanges % 4];
+}
+
+/**
+ * Get the full doubles server rotation starting from a given player.
+ * Returns array of 4 player indices in serving order.
+ *
+ * Standard doubles rotation: T1P1 → T2P1 → T1P2 → T2P2
+ * But we start from whoever the first server is.
+ */
+function getDoublesServerRotation(startingServer) {
+  // Standard order: 0 (T1P1), 2 (T2P1), 1 (T1P2), 3 (T2P2)
+  const standardOrder = [0, 2, 1, 3];
+
+  // Find where the starting server is in the standard order
+  const startIdx = standardOrder.indexOf(startingServer);
+  if (startIdx === -1) {
+    // Fallback if invalid
+    return standardOrder;
+  }
+
+  // Rotate the array to start from the starting server
+  return [
+    ...standardOrder.slice(startIdx),
+    ...standardOrder.slice(0, startIdx)
+  ];
 }
 
 /* ─── Queries ─── */
@@ -264,18 +401,68 @@ function winGame(m, pi) {
     }
   } else if (cs[0] === 6 && cs[1] === 6) {
     m.isTiebreak = true;
-    m.tiebreakStartServer = m.server;
+    // tiebreakStartServer will be set after rotation (below)
   }
 
   // Server rotation
   if (wasInTiebreak) {
-    // The player who served last regular game (tiebreakStartServer) serves first in next set
-    // because the OTHER player served first in the tiebreak, and should now receive
-    m.server = m.tiebreakStartServer;
+    // After tiebreak, the player/team who served first in the tiebreak receives first in next set
+    // So the partner (doubles) or opponent (singles) who would have served next serves first
+    if (isDoubles(m)) {
+      // In doubles: the partner of the tiebreak first server serves first in the new set
+      const tiebreakFirstServer = m.tiebreakStartServer;
+      const tiebreakFirstTeam = getTeamIndex(tiebreakFirstServer);
+      // The OTHER team serves first in the new set, starting with their "next" server
+      const newTeam = 1 - tiebreakFirstTeam;
+      const teamNextServer = m.doublesServerOrder[newTeam];
+      m.server = newTeam * 2 + teamNextServer;
+      // Update the doublesServerOrder for that team
+      m.doublesServerOrder[newTeam] = 1 - teamNextServer;
+    } else {
+      // Singles: player who served first in tiebreak receives first in next set
+      m.server = m.tiebreakStartServer;
+    }
     m.tiebreakStartServer = null;
   } else {
-    m.server = m.server === 0 ? 1 : 0;
+    // Regular game rotation
+    if (isDoubles(m)) {
+      m.server = getNextServerDoubles(m);
+    } else {
+      m.server = m.server === 0 ? 1 : 0;
+    }
   }
+
+  // Set tiebreakStartServer AFTER rotation (this is who actually serves first in the tiebreak)
+  if (m.isTiebreak && m.tiebreakStartServer === null) {
+    m.tiebreakStartServer = m.server;
+  }
+}
+
+/**
+ * Get the next server for doubles after a regular game.
+ * Rotates: T1P1 → T2P1 → T1P2 → T2P2 → T1P1 → ...
+ *
+ * doublesServerOrder[teamIdx] tracks which player (0 or 1 within team)
+ * serves NEXT time that team serves.
+ */
+function getNextServerDoubles(match) {
+  const currentServer = match.server;
+  const currentTeam = getTeamIndex(currentServer);
+
+  // After serving, update the CURRENT team's next server to be the other player
+  const currentPlayerInTeam = currentServer - currentTeam * 2; // 0 or 1 within team
+  match.doublesServerOrder[currentTeam] = 1 - currentPlayerInTeam;
+
+  // Move to the other team
+  const nextTeam = 1 - currentTeam;
+
+  // Get which player on that team serves next
+  const nextPlayerInTeam = match.doublesServerOrder[nextTeam];
+
+  // Calculate player index: team 0 = players 0,1; team 1 = players 2,3
+  const nextServer = nextTeam * 2 + nextPlayerInTeam;
+
+  return nextServer;
 }
 
 export function scorePoint(m, pi) {
@@ -474,35 +661,63 @@ export function validateScore(sets, currentGamePoints, bestOf) {
 
 /**
  * Calculate who should be serving based on total games played.
- * In tennis, server alternates each game. Player 1 serves first (game 0).
+ * In tennis, server alternates each game.
  *
- * Returns 0 or 1 (player index).
+ * For singles: Returns 0 or 1 (player index).
+ * For doubles: Returns 0-3 (player index). Use matchType='doubles' or numPlayers=4.
+ *
+ * @param {Array} sets - Array of set scores
+ * @param {boolean} isTiebreak - Whether in tiebreak
+ * @param {number} tiebreakPoints - Total tiebreak points played
+ * @param {object} options - Optional: { matchType: 'doubles', firstServer: 0 }
  */
-export function calculateServer(sets, isTiebreak, tiebreakPoints) {
+export function calculateServer(sets, isTiebreak, tiebreakPoints, options = {}) {
+  const isDoublesMatch = options.matchType === 'doubles' || options.numPlayers === 4;
+
   // Count total games played across all sets
   let totalGames = 0;
   for (const [g1, g2] of sets) {
     totalGames += g1 + g2;
   }
 
+  if (!isDoublesMatch) {
+    // SINGLES
+    if (isTiebreak) {
+      const tiebreakFirstServer = totalGames % 2 === 0 ? 0 : 1;
+
+      if (tiebreakPoints === 0) {
+        return tiebreakFirstServer;
+      }
+      const pointsSinceFirst = tiebreakPoints;
+      const serverChanges = Math.floor((pointsSinceFirst + 1) / 2);
+      return (tiebreakFirstServer + serverChanges) % 2;
+    }
+
+    // Regular game: alternates each game
+    return totalGames % 2;
+  }
+
+  // DOUBLES
+  // Server order: 0 → 2 → 1 → 3 (T1P1 → T2P1 → T1P2 → T2P2)
+  const doublesOrder = [0, 2, 1, 3];
+
   if (isTiebreak) {
-    // In tiebreak, server changes after first point, then every 2 points
-    // The player who would serve the 13th game (first tiebreak) serves first
-    const tiebreakFirstServer = totalGames % 2 === 0 ? 0 : 1;
+    // Tiebreak first server is whoever would have served the 13th game
+    const tiebreakFirstServerIdx = totalGames % 4;
+    const tiebreakFirstServer = doublesOrder[tiebreakFirstServerIdx];
 
     if (tiebreakPoints === 0) {
       return tiebreakFirstServer;
     }
-    // After first point, changes every 2 points
-    const pointsSinceFirst = tiebreakPoints;
-    const serverChanges = Math.floor((pointsSinceFirst + 1) / 2);
-    return (tiebreakFirstServer + serverChanges) % 2;
+
+    // After first point, changes every 2 points through all 4 players
+    const serverChanges = Math.floor((tiebreakPoints + 1) / 2);
+    const rotation = getDoublesServerRotation(tiebreakFirstServer);
+    return rotation[serverChanges % 4];
   }
 
-  // Regular game: server alternates each game
-  // Player 1 (index 0) serves games 0, 2, 4, ...
-  // Player 2 (index 1) serves games 1, 3, 5, ...
-  return totalGames % 2;
+  // Regular game: rotate through 4 players
+  return doublesOrder[totalGames % 4];
 }
 
 /**
