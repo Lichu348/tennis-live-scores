@@ -28,11 +28,16 @@ const db = getDatabase(app);
 /* ─── Match CRUD ─── */
 
 /**
- * Save a match to Firebase. Strips local-only `history` array
- * to keep the payload small — undo history stays in React state.
+ * Save a match to Firebase.
+ * - Strips local-only `history` array (undo snapshots stay in React state)
+ * - Preserves `events` array for persistent history and rewind capability
  */
 export async function saveMatch(match) {
-  const payload = { ...match, history: [] };
+  const payload = {
+    ...match,
+    history: [],           // Strip local undo snapshots
+    events: match.events || [],  // Preserve event log
+  };
   await set(ref(db, `matches/${match.id}`), payload);
 }
 
@@ -101,4 +106,217 @@ export function subscribeToMatch(id, callback) {
     }
   );
   return unsubscribe;
+}
+
+/* ─── Settings (PIN, auto-cleanup, etc.) ─── */
+
+/**
+ * Get app settings from Firebase.
+ */
+export async function getSettings() {
+  const snap = await get(ref(db, "settings"));
+  return snap.exists() ? snap.val() : {};
+}
+
+/**
+ * Get the stored PIN hash. Returns null if no PIN is set.
+ */
+export async function getUmpirePin() {
+  const snap = await get(ref(db, "settings/umpirePin"));
+  return snap.exists() ? snap.val() : null;
+}
+
+/**
+ * Set (or update) the umpire PIN hash.
+ */
+export async function setUmpirePin(pinHash) {
+  await set(ref(db, "settings/umpirePin"), pinHash);
+}
+
+/**
+ * Hash a PIN using PBKDF2 with salt.
+ * Returns { salt: string, hash: string }
+ *
+ * Note: This is client-side protection only - for true security,
+ * use Firebase Authentication with server-side validation.
+ */
+export async function hashPin(pin) {
+  // Generate random salt
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+
+  // Import the PIN as key material
+  const keyMaterial = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(pin),
+    "PBKDF2",
+    false,
+    ["deriveBits"]
+  );
+
+  // Derive the hash using PBKDF2 with 100,000 iterations
+  const hashBuffer = await crypto.subtle.deriveBits(
+    {
+      name: "PBKDF2",
+      salt: salt,
+      iterations: 100000,
+      hash: "SHA-256",
+    },
+    keyMaterial,
+    256
+  );
+
+  // Convert to hex strings
+  const saltHex = Array.from(salt).map(b => b.toString(16).padStart(2, "0")).join("");
+  const hashHex = Array.from(new Uint8Array(hashBuffer)).map(b => b.toString(16).padStart(2, "0")).join("");
+
+  // Store as combined string: salt$hash
+  return `${saltHex}$${hashHex}`;
+}
+
+/**
+ * Verify a PIN against the stored hash.
+ * Returns true if PIN is correct, false otherwise.
+ */
+export async function verifyPin(pin) {
+  const stored = await getUmpirePin();
+  if (!stored) return true; // No PIN set = always valid
+
+  // Handle legacy SHA-256 hashes (no salt)
+  if (!stored.includes("$")) {
+    // Old format - direct SHA-256 hash
+    const encoder = new TextEncoder();
+    const data = encoder.encode(pin);
+    const hashBuffer = await crypto.subtle.digest("SHA-256", data);
+    const hashArray = Array.from(new Uint8Array(hashBuffer));
+    const legacyHash = hashArray.map(b => b.toString(16).padStart(2, "0")).join("");
+    return legacyHash === stored;
+  }
+
+  // New format: salt$hash
+  const [saltHex, storedHashHex] = stored.split("$");
+
+  // Reconstruct salt from hex
+  const salt = new Uint8Array(saltHex.match(/.{2}/g).map(h => parseInt(h, 16)));
+
+  // Derive hash using same salt
+  const keyMaterial = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(pin),
+    "PBKDF2",
+    false,
+    ["deriveBits"]
+  );
+
+  const hashBuffer = await crypto.subtle.deriveBits(
+    {
+      name: "PBKDF2",
+      salt: salt,
+      iterations: 100000,
+      hash: "SHA-256",
+    },
+    keyMaterial,
+    256
+  );
+
+  const inputHashHex = Array.from(new Uint8Array(hashBuffer)).map(b => b.toString(16).padStart(2, "0")).join("");
+
+  return inputHashHex === storedHashHex;
+}
+
+/**
+ * Delete old matches by age (hours).
+ */
+export async function deleteOldMatches(hoursOld = 24) {
+  const snap = await get(ref(db, "matches"));
+  if (!snap.exists()) return 0;
+
+  const cutoff = Date.now() - hoursOld * 60 * 60 * 1000;
+  const matches = snap.val();
+  let deleted = 0;
+
+  for (const [id, match] of Object.entries(matches)) {
+    const matchTime = match.finishedAt || match.createdAt;
+    if (match.status === "finished" && matchTime < cutoff) {
+      await remove(ref(db, `matches/${id}`));
+      deleted++;
+    }
+  }
+
+  return deleted;
+}
+
+/* ─── Match Locking ─── */
+
+// Stale lock threshold: 5 minutes
+const LOCK_STALE_MS = 5 * 60 * 1000;
+
+/**
+ * Generate a unique session ID for this browser tab.
+ * Stored in sessionStorage so it persists across refreshes
+ * but is unique per tab.
+ */
+export function getSessionId() {
+  let sessionId = sessionStorage.getItem("umpireSessionId");
+  if (!sessionId) {
+    sessionId = `session-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    sessionStorage.setItem("umpireSessionId", sessionId);
+  }
+  return sessionId;
+}
+
+/**
+ * Check if a match is locked by another session.
+ * Returns { isLocked, lockedBy, lockedAt, isStale } or null if not locked.
+ */
+export function checkMatchLock(match) {
+  if (!match || !match.lockedBy) {
+    return null;
+  }
+
+  const mySessionId = getSessionId();
+  const isMyLock = match.lockedBy === mySessionId;
+  const age = Date.now() - (match.lockedAt || 0);
+  const isStale = age > LOCK_STALE_MS;
+
+  return {
+    isLocked: !isMyLock,
+    lockedBy: match.lockedBy,
+    lockedAt: match.lockedAt,
+    isStale,
+    isMine: isMyLock,
+  };
+}
+
+/**
+ * Acquire lock on a match.
+ * Adds lockedBy and lockedAt fields to the match.
+ */
+export function acquireLock(match) {
+  return {
+    ...match,
+    lockedBy: getSessionId(),
+    lockedAt: Date.now(),
+  };
+}
+
+/**
+ * Refresh the lock timestamp (call on every point scored).
+ */
+export function refreshLock(match) {
+  if (match.lockedBy !== getSessionId()) {
+    // Don't refresh if we don't own the lock
+    return match;
+  }
+  return {
+    ...match,
+    lockedAt: Date.now(),
+  };
+}
+
+/**
+ * Release the lock on a match.
+ */
+export function releaseLock(match) {
+  const { lockedBy, lockedAt, ...rest } = match;
+  return rest;
 }

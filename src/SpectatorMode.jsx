@@ -1,38 +1,213 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import {
-  Monitor, ChevronLeft, Wifi, WifiOff,
-  Maximize2, Minimize2, Trophy,
+  Monitor, ChevronLeft, Wifi, WifiOff, RefreshCw,
+  Maximize2, Minimize2, Trophy, AlertTriangle,
 } from "lucide-react";
 import { getPointDisplay, isDeuce, getAlerts } from "./scoring";
 import { subscribeToMatches } from "./firebase";
 import ScoreTable from "./ScoreTable";
 import { S, COURT_COLORS } from "./styles";
 
+// Staleness thresholds (ms)
+const STALE_WARNING_MS = 30000;     // 30 sec - show "Xs ago"
+const STALE_ALERT_MS = 60000;       // 60 sec - yellow warning
+const STALE_CRITICAL_MS = 300000;   // 5 min - red warning + auto-refresh
+const HEARTBEAT_INTERVAL_MS = 15000; // 15 sec check interval
+
+// Reconnection backoff (ms)
+const BACKOFF_DELAYS = [1000, 2000, 4000, 8000, 16000, 30000];
+const MAX_RECONNECT_ATTEMPTS = 10;
+
 export default function SpectatorMode({ onBack }) {
   const [matches, setMatches] = useState([]);
   const [expanded, setExpanded] = useState(null);
   const [connected, setConnected] = useState(false);
+  const [lastUpdate, setLastUpdate] = useState(Date.now());
+  const [staleness, setStaleness] = useState(0); // ms since last update
+  const [reconnectAttempts, setReconnectAttempts] = useState(0);
+  const [isReconnecting, setIsReconnecting] = useState(false);
 
-  /* Real-time subscription to all matches */
-  useEffect(() => {
+  const unsubRef = useRef(null);
+  const reconnectTimeoutRef = useRef(null);
+
+  // Reconnection with exponential backoff - defined first to avoid stale closures
+  const attemptReconnect = useCallback(() => {
+    setReconnectAttempts(prev => {
+      if (prev >= MAX_RECONNECT_ATTEMPTS) {
+        setIsReconnecting(false);
+        return prev;
+      }
+
+      setIsReconnecting(true);
+      const delay = BACKOFF_DELAYS[Math.min(prev, BACKOFF_DELAYS.length - 1)];
+
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+      }
+
+      reconnectTimeoutRef.current = setTimeout(() => {
+        // Clean up existing subscription
+        if (unsubRef.current) {
+          unsubRef.current();
+          unsubRef.current = null;
+        }
+
+        let hasReceivedData = false;
+
+        // Re-subscribe
+        unsubRef.current = subscribeToMatches(
+          (all) => {
+            hasReceivedData = true;
+            setMatches(all);
+            setConnected(true);
+            setLastUpdate(Date.now());
+            setReconnectAttempts(0);
+            setIsReconnecting(false);
+          },
+          (error) => {
+            console.error("Subscription error:", error);
+            setConnected(false);
+            setIsReconnecting(false);
+            // Schedule another retry after error
+            setReconnectAttempts(p => {
+              if (p < MAX_RECONNECT_ATTEMPTS) {
+                const nextDelay = BACKOFF_DELAYS[Math.min(p, BACKOFF_DELAYS.length - 1)];
+                reconnectTimeoutRef.current = setTimeout(() => {
+                  attemptReconnect();
+                }, nextDelay);
+              }
+              return p;
+            });
+          }
+        );
+
+        // Timeout for this reconnect attempt
+        setTimeout(() => {
+          if (!hasReceivedData && unsubRef.current) {
+            // No data received - treat as failure
+            setIsReconnecting(false);
+            setReconnectAttempts(p => {
+              if (p < MAX_RECONNECT_ATTEMPTS) {
+                attemptReconnect();
+              }
+              return p;
+            });
+          }
+        }, 5000);
+      }, delay);
+
+      return prev + 1;
+    });
+  }, []);
+
+  // Subscribe to matches with reconnection support
+  const subscribe = useCallback(() => {
+    // Clean up existing subscription
+    if (unsubRef.current) {
+      unsubRef.current();
+      unsubRef.current = null;
+    }
+
     let hasReceivedData = false;
-    const unsub = subscribeToMatches(
+
+    unsubRef.current = subscribeToMatches(
       (all) => {
         setMatches(all);
         hasReceivedData = true;
         setConnected(true);
+        setLastUpdate(Date.now());
+        setReconnectAttempts(0);
+        setIsReconnecting(false);
       },
       (error) => {
         console.error("Subscription error:", error);
         setConnected(false);
+        attemptReconnect();
       }
     );
-    // Only mark as connected after timeout if we've received data
+
+    // Initial connection timeout
     const t = setTimeout(() => {
-      if (!hasReceivedData) setConnected(false);
+      if (!hasReceivedData) {
+        setConnected(false);
+        attemptReconnect();
+      }
     }, 5000);
-    return () => { unsub(); clearTimeout(t); };
-  }, []);
+
+    return () => clearTimeout(t);
+  }, [attemptReconnect]);
+
+  // Initial subscription
+  useEffect(() => {
+    const cleanup = subscribe();
+    return () => {
+      cleanup?.();
+      if (unsubRef.current) unsubRef.current();
+      if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
+    };
+  }, [subscribe]);
+
+  // Heartbeat: check staleness every 15 seconds
+  useEffect(() => {
+    const heartbeat = setInterval(() => {
+      const now = Date.now();
+      const staleMs = now - lastUpdate;
+      setStaleness(staleMs);
+
+      // After 5 minutes stale, escalate reconnect attempts (don't auto-refresh)
+      // Firebase will handle actual reconnection - we just need to show status
+      if (staleMs >= STALE_CRITICAL_MS && connected) {
+        // Mark as disconnected to trigger reconnect UI
+        setConnected(false);
+      }
+
+      // Attempt reconnect if stale for 60+ seconds
+      if (staleMs >= STALE_ALERT_MS && !isReconnecting && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+        console.log("Data stale, attempting reconnect...");
+        attemptReconnect();
+      }
+    }, HEARTBEAT_INTERVAL_MS);
+
+    return () => clearInterval(heartbeat);
+  }, [lastUpdate, connected, isReconnecting, reconnectAttempts, attemptReconnect]);
+
+  // Manual refresh handler
+  const handleManualRefresh = () => {
+    window.location.reload();
+  };
+
+  // Format staleness for display
+  const getStalenessText = () => {
+    if (staleness < STALE_WARNING_MS) return null;
+    const seconds = Math.floor(staleness / 1000);
+    if (seconds < 60) return `${seconds}s ago`;
+    const minutes = Math.floor(seconds / 60);
+    return `${minutes}m ago`;
+  };
+
+  // Get connection status display
+  const getConnectionStatus = () => {
+    if (isReconnecting) {
+      return {
+        icon: <RefreshCw size={14} className="spin" />,
+        text: `Reconnecting (${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`,
+        color: S.gold,
+      };
+    }
+    if (!connected) {
+      return { icon: <WifiOff size={14} />, text: "Disconnected", color: S.red };
+    }
+    if (staleness >= STALE_CRITICAL_MS) {
+      return { icon: <AlertTriangle size={14} />, text: "Connection lost", color: S.red };
+    }
+    if (staleness >= STALE_ALERT_MS) {
+      return { icon: <AlertTriangle size={14} />, text: getStalenessText(), color: "#d97706" };
+    }
+    if (staleness >= STALE_WARNING_MS) {
+      return { icon: <Wifi size={14} />, text: getStalenessText(), color: S.textDim };
+    }
+    return { icon: <Wifi size={14} />, text: "Live", color: S.greenBright };
+  };
 
   const liveMatches = matches.filter(m => m.status === "live");
   const recentFinished = matches
@@ -144,7 +319,11 @@ export default function SpectatorMode({ onBack }) {
           </div>
         )}
 
-        <style>{`@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.7} }`}</style>
+        <style>{`
+          @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.7} }
+          @keyframes spin { from{transform:rotate(0deg)} to{transform:rotate(360deg)} }
+          .spin { animation: spin 1s linear infinite; }
+        `}</style>
       </div>
     );
   }
@@ -164,9 +343,37 @@ export default function SpectatorMode({ onBack }) {
         }}>
           Live Scores
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: connected ? S.greenBright : S.red }}>
-          {connected ? <Wifi size={14} /> : <WifiOff size={14} />}
-          {connected ? "Live" : "Connecting…"}
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          {/* Staleness warning with manual refresh */}
+          {staleness >= STALE_ALERT_MS && (
+            <button
+              onClick={handleManualRefresh}
+              style={{
+                background: staleness >= STALE_CRITICAL_MS ? S.red : "#d97706",
+                border: "none",
+                borderRadius: 4,
+                padding: "4px 8px",
+                fontSize: 11,
+                color: "#fff",
+                cursor: "pointer",
+                display: "flex",
+                alignItems: "center",
+                gap: 4,
+              }}
+            >
+              <RefreshCw size={12} /> Refresh
+            </button>
+          )}
+          {/* Connection status */}
+          {(() => {
+            const status = getConnectionStatus();
+            return (
+              <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: status.color }}>
+                {status.icon}
+                {status.text}
+              </div>
+            );
+          })()}
         </div>
       </div>
 
@@ -197,7 +404,11 @@ export default function SpectatorMode({ onBack }) {
         ))}
       </div>
 
-      <style>{`@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.7} }`}</style>
+      <style>{`
+        @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.7} }
+        @keyframes spin { from{transform:rotate(0deg)} to{transform:rotate(360deg)} }
+        .spin { animation: spin 1s linear infinite; }
+      `}</style>
     </div>
   );
 }

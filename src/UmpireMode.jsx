@@ -1,15 +1,34 @@
-import { useState, useEffect } from "react";
-import { Undo2, ChevronLeft, CircleDot, Trophy, RefreshCw } from "lucide-react";
-import { createMatch, scorePoint, undoPoint, getPointDisplay, isDeuce, getAlerts } from "./scoring";
-import { saveMatch, removeMatch, subscribeToMatches } from "./firebase";
+import { useState, useEffect, useCallback } from "react";
+import { Undo2, ChevronLeft, CircleDot, Trophy, RefreshCw, Lock, AlertTriangle, Edit3, History } from "lucide-react";
+import {
+  createMatch, scorePoint, undoPoint, getPointDisplay, isDeuce, getAlerts,
+  replayEvents, formatScoreSummary
+} from "./scoring";
+import {
+  saveMatch, removeMatch, subscribeToMatches, subscribeToMatch,
+  checkMatchLock, acquireLock, refreshLock, releaseLock, getSessionId
+} from "./firebase";
 import ScoreTable from "./ScoreTable";
+import ScoreAdjustModal from "./ScoreAdjustModal";
+import HistoryModal from "./HistoryModal";
 import { S, COURT_COLORS } from "./styles";
 
-export default function UmpireMode({ onBack }) {
+export default function UmpireMode({ onBack, onLock }) {
   const [match, setMatch] = useState(null);
   const [setup, setSetup] = useState({ p1: "", p2: "", court: 0, bestOf: 3 });
   const [liveMatches, setLiveMatches] = useState([]);
   const [showResume, setShowResume] = useState(false);
+
+  // Lock states
+  const [lockConflict, setLockConflict] = useState(null); // { lockedBy, isStale }
+  const [showTakeoverConfirm, setShowTakeoverConfirm] = useState(false);
+  const [pendingResumeMatch, setPendingResumeMatch] = useState(null);
+
+  // Score adjustment state
+  const [showScoreAdjust, setShowScoreAdjust] = useState(false);
+
+  // History viewer state
+  const [showHistory, setShowHistory] = useState(false);
 
   /* ─── Load existing live matches for resume ─── */
   useEffect(() => {
@@ -24,52 +43,163 @@ export default function UmpireMode({ onBack }) {
     return unsub;
   }, []);
 
+  /* ─── Subscribe to match changes for conflict detection ─── */
+  useEffect(() => {
+    if (!match) return;
+
+    const unsub = subscribeToMatch(match.id, (remoteMatch) => {
+      if (!remoteMatch) return;
+
+      const lock = checkMatchLock(remoteMatch);
+      if (lock && lock.isLocked && !lock.isStale) {
+        // Another session took over
+        setLockConflict({
+          lockedBy: lock.lockedBy,
+          isStale: false,
+          message: "Another device is scoring this match",
+        });
+      }
+    });
+
+    return unsub;
+  }, [match?.id]);
+
   /* ─── Resume existing match ─── */
-  const resumeMatch = (m) => {
-    // Restore with empty history (undo won't work for actions before resume)
-    setMatch({ ...m, history: [] });
+  const attemptResume = useCallback((m) => {
+    const lock = checkMatchLock(m);
+
+    if (lock && lock.isLocked) {
+      // Match is locked by another session
+      setPendingResumeMatch(m);
+      setLockConflict({
+        lockedBy: lock.lockedBy,
+        isStale: lock.isStale,
+        message: lock.isStale
+          ? "This match was being scored but the session expired"
+          : "This match is being scored by another device",
+      });
+      setShowTakeoverConfirm(true);
+      return;
+    }
+
+    // No lock or our lock - proceed with resume
+    resumeWithLock(m);
+  }, []);
+
+  const resumeWithLock = useCallback((m) => {
+    // Acquire lock
+    const lockedMatch = acquireLock(m);
+
+    // If match has events, replay them to restore full undo capability
+    let restored;
+    if (lockedMatch.events && lockedMatch.events.length > 0) {
+      restored = replayEvents(lockedMatch);
+      restored.lockedBy = lockedMatch.lockedBy;
+      restored.lockedAt = lockedMatch.lockedAt;
+    } else {
+      restored = { ...lockedMatch, history: [], events: [] };
+    }
+
+    setMatch(restored);
+    saveMatch(restored);
     setShowResume(false);
-  };
+    setShowTakeoverConfirm(false);
+    setPendingResumeMatch(null);
+    setLockConflict(null);
+  }, []);
+
+  const handleTakeover = useCallback(() => {
+    if (pendingResumeMatch) {
+      resumeWithLock(pendingResumeMatch);
+    }
+  }, [pendingResumeMatch, resumeWithLock]);
+
+  const cancelTakeover = useCallback(() => {
+    setShowTakeoverConfirm(false);
+    setPendingResumeMatch(null);
+    setLockConflict(null);
+  }, []);
+
+  /* ─── Score Adjustment ─── */
+  const handleScoreAdjust = useCallback((newMatch) => {
+    // Apply lock to the adjusted match
+    const lockedMatch = acquireLock(newMatch);
+    setMatch(lockedMatch);
+    saveMatch(lockedMatch);
+    setShowScoreAdjust(false);
+  }, []);
+
+  /* ─── History Rewind ─── */
+  const handleRewind = useCallback((newMatch) => {
+    // Apply lock and save
+    const lockedMatch = acquireLock(newMatch);
+    setMatch(lockedMatch);
+    saveMatch(lockedMatch);
+    setShowHistory(false);
+  }, []);
 
   /* ─── Start Match ─── */
   const startMatch = () => {
     if (!setup.p1.trim() || !setup.p2.trim()) return;
     const m = createMatch(setup.p1.trim(), setup.p2.trim(), setup.court, setup.bestOf);
-    setMatch(m);
-    saveMatch(m);
+    const lockedMatch = acquireLock(m);
+    setMatch(lockedMatch);
+    saveMatch(lockedMatch);
   };
 
   /* ─── Score Point ─── */
   const handleScore = (pi) => {
+    // Don't score if we have a lock conflict
+    if (lockConflict) return;
+
     setMatch(prev => {
       const next = scorePoint(prev, pi);
-      saveMatch(next); // fire-and-forget write to Firebase
-      return next;
+      // Refresh lock on every point
+      const withLock = refreshLock(next);
+      saveMatch(withLock);
+      return withLock;
     });
   };
 
   /* ─── Undo ─── */
   const handleUndo = () => {
+    if (lockConflict) return;
+
     setMatch(prev => {
       const next = undoPoint(prev);
-      saveMatch(next);
-      return next;
+      // Refresh lock on undo too
+      const withLock = refreshLock(next);
+      saveMatch(withLock);
+      return withLock;
     });
   };
 
   /* ─── End / New Match ─── */
   const handleEndMatch = () => {
-    if (match) removeMatch(match.id);
+    if (match) {
+      // Release lock before removing
+      const unlocked = releaseLock(match);
+      saveMatch(unlocked);
+      removeMatch(match.id);
+    }
     setMatch(null);
+    setLockConflict(null);
   };
 
   /* ═══════════════════ SETUP SCREEN ═══════════════════ */
   if (!match) {
     return (
       <div style={{ padding: 20 }}>
-        <button onClick={onBack} style={backBtn}>
-          <ChevronLeft size={18} /> Back
-        </button>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <button onClick={onBack} style={backBtn}>
+            <ChevronLeft size={18} /> Back
+          </button>
+          {onLock && (
+            <button onClick={onLock} style={lockBtn}>
+              <Lock size={14} /> Lock
+            </button>
+          )}
+        </div>
 
         <div style={heading}>New Match</div>
 
@@ -137,6 +267,51 @@ export default function UmpireMode({ onBack }) {
             Start Match
           </button>
 
+          {/* Lock takeover confirmation */}
+          {showTakeoverConfirm && lockConflict && (
+            <div style={{
+              position: "fixed", top: 0, left: 0, right: 0, bottom: 0,
+              background: "rgba(0,0,0,0.8)", display: "flex",
+              alignItems: "center", justifyContent: "center", padding: 20, zIndex: 1000,
+            }}>
+              <div style={{
+                background: S.surface, borderRadius: 16, padding: 24,
+                maxWidth: 360, width: "100%", border: `1px solid ${S.border}`,
+              }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 16 }}>
+                  <AlertTriangle size={24} color="#d97706" />
+                  <span style={{
+                    fontFamily: "'Oswald', sans-serif", fontSize: 20,
+                    fontWeight: 600, color: S.text,
+                  }}>
+                    Match In Use
+                  </span>
+                </div>
+                <p style={{ color: S.textDim, fontSize: 14, marginBottom: 20 }}>
+                  {lockConflict.message}
+                  {lockConflict.isStale && " You can safely take over."}
+                </p>
+                <div style={{ display: "flex", gap: 12 }}>
+                  <button onClick={cancelTakeover} style={{
+                    flex: 1, padding: "12px 16px", borderRadius: 8,
+                    background: S.surfaceLight, border: `1px solid ${S.border}`,
+                    color: S.text, cursor: "pointer", fontSize: 14,
+                  }}>
+                    Cancel
+                  </button>
+                  <button onClick={handleTakeover} style={{
+                    flex: 1, padding: "12px 16px", borderRadius: 8,
+                    background: lockConflict.isStale ? S.green : "#d97706",
+                    border: "none", color: "#fff", cursor: "pointer", fontSize: 14,
+                    fontWeight: 600,
+                  }}>
+                    {lockConflict.isStale ? "Take Over" : "Force Take Over"}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* Resume existing match */}
           {liveMatches.length > 0 && (
             <div style={{ marginTop: 24, paddingTop: 20, borderTop: `1px solid ${S.border}` }}>
@@ -152,8 +327,10 @@ export default function UmpireMode({ onBack }) {
                 <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 8 }}>
                   {liveMatches.map(m => {
                     const cc = COURT_COLORS[m.courtIdx] || COURT_COLORS[0];
+                    const lock = checkMatchLock(m);
+                    const isLocked = lock && lock.isLocked && !lock.isStale;
                     return (
-                      <button key={m.id} onClick={() => resumeMatch(m)} style={{
+                      <button key={m.id} onClick={() => attemptResume(m)} style={{
                         padding: "12px 16px", background: S.surface,
                         border: `1px solid ${S.border}`, borderRadius: 10,
                         cursor: "pointer", textAlign: "left",
@@ -161,6 +338,15 @@ export default function UmpireMode({ onBack }) {
                         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
                           <div style={{ width: 8, height: 8, borderRadius: "50%", background: cc.light }} />
                           <span style={{ fontSize: 12, color: S.textDim }}>{cc.name}</span>
+                          {isLocked && (
+                            <span style={{
+                              fontSize: 10, padding: "2px 6px", borderRadius: 4,
+                              background: "#d9770622", color: "#d97706",
+                              display: "flex", alignItems: "center", gap: 4,
+                            }}>
+                              <Lock size={10} /> In Use
+                            </span>
+                          )}
                         </div>
                         <div style={{ color: S.text, fontSize: 14, fontWeight: 500 }}>
                           {m.players[0]} vs {m.players[1]}
@@ -196,20 +382,87 @@ export default function UmpireMode({ onBack }) {
           <div style={{ width: 10, height: 10, borderRadius: "50%", background: cc.light }} />
           <span style={{ fontSize: 13, color: S.textDim, fontWeight: 500 }}>{cc.name}</span>
         </div>
-        <button onClick={handleUndo} disabled={!match.history.length} style={{
-          padding: "6px 12px", background: S.surface, border: `1px solid ${S.border}`,
-          borderRadius: 8, color: match.history.length ? S.text : S.textDim,
-          cursor: match.history.length ? "pointer" : "default",
-          display: "flex", alignItems: "center", gap: 4, fontSize: 12,
-          fontFamily: "'Barlow', sans-serif",
-          opacity: match.history.length ? 1 : 0.4,
-        }}>
-          <Undo2 size={14} /> Undo
-        </button>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          {/* History button - show if we have events */}
+          {(match.events?.length > 0) && (
+            <button onClick={() => setShowHistory(true)} style={{
+              padding: "6px 12px", background: S.surface, border: `1px solid ${S.border}`,
+              borderRadius: 8, color: S.textDim,
+              cursor: "pointer",
+              display: "flex", alignItems: "center", gap: 4, fontSize: 12,
+              fontFamily: "'Barlow', sans-serif",
+            }}>
+              <History size={14} />
+            </button>
+          )}
+          {match.status === "live" && (
+            <button onClick={() => setShowScoreAdjust(true)} style={{
+              padding: "6px 12px", background: S.surface, border: `1px solid ${S.border}`,
+              borderRadius: 8, color: S.textDim,
+              cursor: "pointer",
+              display: "flex", alignItems: "center", gap: 4, fontSize: 12,
+              fontFamily: "'Barlow', sans-serif",
+            }}>
+              <Edit3 size={14} /> Adjust
+            </button>
+          )}
+          <button onClick={handleUndo} disabled={!match.history.length} style={{
+            padding: "6px 12px", background: S.surface, border: `1px solid ${S.border}`,
+            borderRadius: 8, color: match.history.length ? S.text : S.textDim,
+            cursor: match.history.length ? "pointer" : "default",
+            display: "flex", alignItems: "center", gap: 4, fontSize: 12,
+            fontFamily: "'Barlow', sans-serif",
+            opacity: match.history.length ? 1 : 0.4,
+          }}>
+            <Undo2 size={14} /> Undo
+          </button>
+        </div>
       </div>
 
+      {/* Score adjustment modal */}
+      {showScoreAdjust && (
+        <ScoreAdjustModal
+          match={match}
+          onSubmit={handleScoreAdjust}
+          onCancel={() => setShowScoreAdjust(false)}
+        />
+      )}
+
+      {/* History viewer modal */}
+      {showHistory && (
+        <HistoryModal
+          match={match}
+          onRewind={handleRewind}
+          onCancel={() => setShowHistory(false)}
+        />
+      )}
+
+      {/* Lock conflict banner */}
+      {lockConflict && (
+        <div style={{
+          padding: "12px 16px", textAlign: "center",
+          background: "#dc262622", borderBottom: `1px solid #dc2626`,
+          display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+        }}>
+          <AlertTriangle size={16} color={S.red} />
+          <span style={{ color: S.red, fontSize: 13 }}>
+            {lockConflict.message}
+          </span>
+          <button
+            onClick={() => resumeWithLock(match)}
+            style={{
+              marginLeft: 8, padding: "4px 10px", borderRadius: 6,
+              background: S.red, border: "none", color: "#fff",
+              fontSize: 12, cursor: "pointer",
+            }}
+          >
+            Reclaim
+          </button>
+        </div>
+      )}
+
       {/* Alert banner */}
-      {alerts.length > 0 && match.status === "live" && (
+      {alerts.length > 0 && match.status === "live" && !lockConflict && (
         <div style={{
           padding: "8px 16px", textAlign: "center",
           fontFamily: "'Oswald', sans-serif", fontSize: 15,
@@ -323,6 +576,12 @@ const backBtn = {
   background: "none", border: "none", color: S.textDim,
   cursor: "pointer", display: "flex", alignItems: "center",
   gap: 6, marginBottom: 20, fontSize: 14, fontFamily: "'Barlow', sans-serif",
+};
+const lockBtn = {
+  background: S.surface, border: `1px solid ${S.border}`,
+  borderRadius: 8, color: S.textDim, cursor: "pointer",
+  display: "flex", alignItems: "center", gap: 4, padding: "6px 12px",
+  fontSize: 12, fontFamily: "'Barlow', sans-serif", marginBottom: 20,
 };
 const heading = {
   fontFamily: "'Oswald', sans-serif", fontSize: 28, fontWeight: 600,
