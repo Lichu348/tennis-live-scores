@@ -64,16 +64,27 @@ export default function App() {
 
     setPendingMode(targetMode);
 
-    // Check if PIN is set
-    const pinHash = await getUmpirePin();
+    try {
+      // Check if PIN is set (with 10s timeout to prevent hanging)
+      const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("Connection timeout")), 10000)
+      );
+      const pinHash = await Promise.race([getUmpirePin(), timeoutPromise]);
 
-    if (pinHash) {
-      // PIN exists - require entry
-      setPinMode("entry");
-      setShowPinModal(true);
-    } else {
-      // No PIN - offer setup
-      setPinMode("setup");
+      if (pinHash) {
+        // PIN exists - require entry
+        setPinMode("entry");
+        setShowPinModal(true);
+      } else {
+        // No PIN - offer setup
+        setPinMode("setup");
+        setShowPinModal(true);
+      }
+    } catch (err) {
+      console.error("Failed to check PIN status:", err);
+      // On error, show error in PIN modal - do NOT bypass security
+      setPinError(`Unable to connect: ${err.message}. Please check your connection and try again.`);
+      setPinMode("entry"); // Show entry mode so user sees the error
       setShowPinModal(true);
     }
   }, []);

@@ -251,8 +251,9 @@ export default function TournamentView({ tournament: initialTournament, onBack }
 
   /**
    * Handle match completion - update bracket/standings based on tournament format.
+   * Writes are awaited sequentially to prevent race conditions.
    */
-  const handleMatchFinished = useCallback((match) => {
+  const handleMatchFinished = useCallback(async (match) => {
     if (!activeBracketPosition || !tournament) return;
 
     const { roundIndex, matchPosition } = activeBracketPosition;
@@ -260,58 +261,54 @@ export default function TournamentView({ tournament: initialTournament, onBack }
     // Determine winner entry ID
     const winnerEntryId = match.winner === 0 ? match.entry1Id : match.entry2Id;
 
-    // Handle round-robin differently - update standings only, don't touch other fixtures
-    if (tournament.format === "round_robin") {
-      // Calculate sets and games from the match scores
-      const entry1Sets = match.sets.filter(s => s[0] > s[1]).length;
-      const entry2Sets = match.sets.filter(s => s[1] > s[0]).length;
-      const entry1Games = match.sets.reduce((sum, s) => sum + s[0], 0);
-      const entry2Games = match.sets.reduce((sum, s) => sum + s[1], 0);
+    try {
+      // Handle round-robin differently - update standings only, don't touch other fixtures
+      if (tournament.format === "round_robin") {
+        // Calculate sets and games from the match scores
+        const entry1Sets = match.sets.filter(s => s[0] > s[1]).length;
+        const entry2Sets = match.sets.filter(s => s[1] > s[0]).length;
+        const entry1Games = match.sets.reduce((sum, s) => sum + s[0], 0);
+        const entry2Games = match.sets.reduce((sum, s) => sum + s[1], 0);
 
-      // Update standings (returns new tournament with updated standings)
-      const updatedTournament = updateRoundRobinStandings(tournament, roundIndex, matchPosition, {
-        entry1Sets,
-        entry2Sets,
-        entry1Games,
-        entry2Games,
-      });
+        // Update standings (returns new tournament with updated standings)
+        const updatedTournament = updateRoundRobinStandings(tournament, roundIndex, matchPosition, {
+          entry1Sets,
+          entry2Sets,
+          entry1Games,
+          entry2Games,
+        });
 
-      // Persist updated standings to Firebase
-      updateTournament(tournament.id, { standings: updatedTournament.standings });
+        // Persist updated standings to Firebase FIRST
+        await updateTournament(tournament.id, { standings: updatedTournament.standings });
 
-      // Only update this specific match with winnerId - don't touch other matches
-      updateBracketMatch(tournament.id, roundIndex, matchPosition, {
+        // THEN update this specific match with winnerId
+        await updateBracketMatch(tournament.id, roundIndex, matchPosition, {
+          winnerId: winnerEntryId,
+        });
+        return;
+      }
+
+      // Single elimination (knockout) - advance winner to next round
+      const updated = advanceWinner(tournament, roundIndex, matchPosition, winnerEntryId);
+
+      // Save winnerId to Firebase FIRST
+      await updateBracketMatch(tournament.id, roundIndex, matchPosition, {
         winnerId: winnerEntryId,
       });
-      return;
-    }
 
-    // Single elimination (knockout) - advance winner to next round
-    const updated = advanceWinner(tournament, roundIndex, matchPosition, winnerEntryId);
+      // THEN update next round slot if applicable
+      if (roundIndex + 1 < updated.rounds.length) {
+        const nextMatchPosition = Math.ceil(matchPosition / 2);
+        const isFirstSlot = matchPosition % 2 === 1;
+        const nextMatch = updated.rounds[roundIndex + 1].matches[nextMatchPosition - 1];
 
-    // Save to Firebase
-    updateBracketMatch(tournament.id, roundIndex, matchPosition, {
-      winnerId: winnerEntryId,
-    });
-
-    // If there's a next round, also update the next match's entry
-    if (roundIndex + 1 < updated.rounds.length) {
-      const nextMatchPosition = Math.ceil(matchPosition / 2);
-      const isFirstSlot = matchPosition % 2 === 1;
-      const nextMatch = updated.rounds[roundIndex + 1].matches[nextMatchPosition - 1];
-
-      updateBracketMatch(tournament.id, roundIndex + 1, nextMatchPosition, {
-        entry1: isFirstSlot ? winnerEntryId : nextMatch.entry1,
-        entry2: isFirstSlot ? nextMatch.entry2 : winnerEntryId,
-      });
-    }
-
-    // Check if tournament is complete (final has a winner)
-    const finalRound = updated.rounds[updated.rounds.length - 1];
-    const finalMatch = finalRound?.matches[0];
-    if (finalMatch?.winnerId) {
-      // Tournament complete
-      // Could update tournament status here
+        await updateBracketMatch(tournament.id, roundIndex + 1, nextMatchPosition, {
+          entry1: isFirstSlot ? winnerEntryId : nextMatch.entry1,
+          entry2: isFirstSlot ? nextMatch.entry2 : winnerEntryId,
+        });
+      }
+    } catch (err) {
+      console.error("Failed to update tournament after match completion:", err);
     }
   }, [activeBracketPosition, tournament]);
 
