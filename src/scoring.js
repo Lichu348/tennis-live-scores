@@ -47,6 +47,11 @@ export function createMatch(p1OrPlayers, p2, courtIdx, bestOf, options = {}) {
   // Extract tournament metadata from options (if present)
   const { tournamentId, bracketRound, bracketPosition } = options;
 
+  // Default: 3-set matches use match tiebreak (10-point) in deciding set
+  const useMatchTiebreak = options.useMatchTiebreak !== undefined
+    ? options.useMatchTiebreak
+    : (bestOf === 3);
+
   return {
     id: `m-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
     matchType,
@@ -54,9 +59,11 @@ export function createMatch(p1OrPlayers, p2, courtIdx, bestOf, options = {}) {
     teams,                    // Optional team names for doubles: ["Team 1", "Team 2"]
     courtIdx,
     bestOf,
+    useMatchTiebreak,         // If true, deciding set is a 10-point match tiebreak
     sets: [[0, 0]],
     points: [0, 0],
     isTiebreak: false,
+    isMatchTiebreak: false,   // True when in the deciding set match tiebreak
     tiebreakStartServer: null,
     server: 0,                // For singles: 0 or 1. For doubles: 0-3 (player index)
     doublesServerOrder: isDoubles ? [0, 0] : null, // [team1NextServer, team2NextServer] - 0 or 1 within team
@@ -76,8 +83,10 @@ export function createMatch(p1OrPlayers, p2, courtIdx, bestOf, options = {}) {
  * Create a base match state (no events applied) from match config.
  * Used by replayEvents to start from a clean slate.
  */
-export function createBaseMatch(players, courtIdx, bestOf, id, createdAt, matchType = 'singles', teams = null) {
+export function createBaseMatch(players, courtIdx, bestOf, id, createdAt, matchType = 'singles', teams = null, useMatchTiebreak = null) {
   const isDoubles = matchType === 'doubles' || players.length === 4;
+  // Default: 3-set matches use match tiebreak in deciding set
+  const actualUseMatchTiebreak = useMatchTiebreak !== null ? useMatchTiebreak : (bestOf === 3);
   return {
     id,
     matchType: isDoubles ? 'doubles' : 'singles',
@@ -85,9 +94,11 @@ export function createBaseMatch(players, courtIdx, bestOf, id, createdAt, matchT
     teams,
     courtIdx,
     bestOf,
+    useMatchTiebreak: actualUseMatchTiebreak,
     sets: [[0, 0]],
     points: [0, 0],
     isTiebreak: false,
+    isMatchTiebreak: false,
     tiebreakStartServer: null,
     server: 0,
     doublesServerOrder: isDoubles ? [0, 0] : null,
@@ -156,7 +167,8 @@ export function replayEvents(match, stopAtIndex) {
     match.id,
     match.createdAt,
     match.matchType,
-    match.teams
+    match.teams,
+    match.useMatchTiebreak
   );
 
   const events = match.events || [];
@@ -215,7 +227,20 @@ function scorePointInternal(m, pi) {
   next.history = [...m.history, snapshot(m)];
   const oi = 1 - pi;
 
-  if (next.isTiebreak) {
+  if (next.isMatchTiebreak) {
+    // Match tiebreak (deciding set): first to 10, win by 2
+    next.points[pi]++;
+    const total = next.points[0] + next.points[1];
+    if (total % 2 === 1) {
+      // Switch server every 2 points (after first point, then every 2)
+      next.server = getNextTiebreakServer(next);
+    }
+    if (next.points[pi] >= 10 && next.points[pi] - next.points[oi] >= 2) {
+      // Won the match tiebreak - wins the match
+      winMatchTiebreak(next, pi);
+    }
+  } else if (next.isTiebreak) {
+    // Regular set tiebreak: first to 7, win by 2
     next.points[pi]++;
     const total = next.points[0] + next.points[1];
     if (total % 2 === 1) {
@@ -317,7 +342,7 @@ export function setsNeeded(m) {
 }
 
 export function getPointDisplay(m, pi) {
-  if (m.isTiebreak) return String(m.points[pi]);
+  if (m.isTiebreak || m.isMatchTiebreak) return String(m.points[pi]);
   const p0 = m.points[0], p1 = m.points[1];
   if (p0 >= 3 && p1 >= 3) {
     if (p0 === p1) return "40";
@@ -332,6 +357,10 @@ export function isDeuce(m) {
 
 export function isGamePointFor(m, pi) {
   if (m.status !== "live") return false;
+  if (m.isMatchTiebreak) {
+    // Match tiebreak: need 9+ points and be ahead to be on match point
+    return m.points[pi] >= 9 && m.points[pi] > m.points[1 - pi];
+  }
   if (m.isTiebreak) {
     return m.points[pi] >= 6 && m.points[pi] > m.points[1 - pi];
   }
@@ -363,23 +392,56 @@ export function getAlerts(m) {
   const alerts = [];
   for (let pi = 0; pi < 2; pi++) {
     if (isGamePointFor(m, pi)) {
-      if (wouldWinSet(m, pi) && wouldWinMatch(m, pi)) {
+      if (m.isMatchTiebreak) {
+        // In match tiebreak, any game point is match point
+        alerts.push({ type: "matchPoint", player: pi });
+      } else if (wouldWinSet(m, pi) && wouldWinMatch(m, pi)) {
         alerts.push({ type: "matchPoint", player: pi });
       } else if (wouldWinSet(m, pi)) {
         alerts.push({ type: "setPoint", player: pi });
       }
-      if (m.server !== pi && !m.isTiebreak) {
+      if (m.server !== pi && !m.isTiebreak && !m.isMatchTiebreak) {
         alerts.push({ type: "breakPoint", player: pi });
       }
     }
   }
-  if (m.isTiebreak && alerts.length === 0) {
+  if (m.isMatchTiebreak && alerts.length === 0) {
+    alerts.push({ type: "matchTiebreak", player: -1 });
+  } else if (m.isTiebreak && alerts.length === 0) {
     alerts.push({ type: "tiebreak", player: -1 });
   }
   return alerts;
 }
 
 /* ─── Mutations ─── */
+
+/**
+ * Check if the next set would be the deciding set.
+ * For best of 3: deciding set is when both players have won 1 set each.
+ */
+function isDecidingSet(m) {
+  const setsNeededToWin = setsNeeded(m);
+  const p1Sets = setsWon(m, 0);
+  const p2Sets = setsWon(m, 1);
+  return p1Sets === setsNeededToWin - 1 && p2Sets === setsNeededToWin - 1;
+}
+
+/**
+ * Win the match tiebreak (10-point tiebreak in deciding set).
+ * This ends the match.
+ */
+function winMatchTiebreak(m, pi) {
+  // The match tiebreak counts as winning the deciding set 1-0
+  const cs = currentSet(m);
+  cs[pi] = 1;
+  cs[1 - pi] = 0;
+
+  m.points = [0, 0];
+  m.isMatchTiebreak = false;
+  m.status = "finished";
+  m.winner = pi;
+  m.finishedAt = Date.now();
+}
 
 function winGame(m, pi) {
   const cs = currentSet(m);
@@ -407,6 +469,11 @@ function winGame(m, pi) {
       m.finishedAt = Date.now();
     } else {
       m.sets.push([0, 0]);
+      // Check if entering deciding set with match tiebreak format
+      if (m.useMatchTiebreak && isDecidingSet(m)) {
+        m.isMatchTiebreak = true;
+        // tiebreakStartServer will be set after rotation (below)
+      }
     }
   } else if (cs[0] === 6 && cs[1] === 6) {
     m.isTiebreak = true;
@@ -442,7 +509,7 @@ function winGame(m, pi) {
   }
 
   // Set tiebreakStartServer AFTER rotation (this is who actually serves first in the tiebreak)
-  if (m.isTiebreak && m.tiebreakStartServer === null) {
+  if ((m.isTiebreak || m.isMatchTiebreak) && m.tiebreakStartServer === null) {
     m.tiebreakStartServer = m.server;
   }
 }
@@ -514,7 +581,10 @@ export function rewindToEvent(m, eventIndex) {
       m.courtIdx,
       m.bestOf,
       m.id,
-      m.createdAt
+      m.createdAt,
+      m.matchType,
+      m.teams,
+      m.useMatchTiebreak
     );
   }
   return replayEvents(m, eventIndex);
@@ -547,13 +617,19 @@ export function formatScoreSummary(m) {
   let result = completeSets.map(s => `${s[0]}-${s[1]}`).join(", ");
 
   if (m.status === "live") {
-    if (result) result += ", ";
-    result += `${currSet[0]}-${currSet[1]}`;
+    if (m.isMatchTiebreak) {
+      // In match tiebreak, show as "1-1, MTB(5-3)"
+      if (result) result += ", ";
+      result += `MTB(${m.points[0]}-${m.points[1]})`;
+    } else {
+      if (result) result += ", ";
+      result += `${currSet[0]}-${currSet[1]}`;
 
-    if (m.isTiebreak) {
-      result += ` TB(${m.points[0]}-${m.points[1]})`;
-    } else if (m.points[0] > 0 || m.points[1] > 0) {
-      result += ` (${getPointDisplay(m, 0)}-${getPointDisplay(m, 1)})`;
+      if (m.isTiebreak) {
+        result += ` TB(${m.points[0]}-${m.points[1]})`;
+      } else if (m.points[0] > 0 || m.points[1] > 0) {
+        result += ` (${getPointDisplay(m, 0)}-${getPointDisplay(m, 1)})`;
+      }
     }
   }
 

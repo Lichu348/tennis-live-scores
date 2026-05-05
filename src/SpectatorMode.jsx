@@ -262,7 +262,8 @@ export default function SpectatorMode({ onBack }) {
                 a.type === "matchPoint" ? "Match Point"
                   : a.type === "setPoint" ? "Set Point"
                     : a.type === "breakPoint" ? "Break Point"
-                      : "Tiebreak"
+                      : a.type === "matchTiebreak" ? "Match Tiebreak"
+                        : "Tiebreak"
               )
               .join(" · ")}
           </div>
@@ -300,7 +301,7 @@ export default function SpectatorMode({ onBack }) {
             {[0, 1].map(pi => (
               <div key={pi} style={{ textAlign: "center" }}>
                 <div style={{ fontSize: 14, color: S.textDim, textTransform: "uppercase", letterSpacing: 1 }}>
-                  {m.isTiebreak ? "Tiebreak" : "Points"}
+                  {m.isMatchTiebreak ? "Match Tiebreak" : m.isTiebreak ? "Tiebreak" : "Points"}
                 </div>
                 <div style={{ fontFamily: "'Oswald', sans-serif", fontSize: 56, fontWeight: 700, color: S.text }}>
                   {getPointDisplay(m, pi)}

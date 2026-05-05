@@ -438,7 +438,8 @@ export default function TournamentView({ tournament: initialTournament, onBack }
                 a.type === "matchPoint" ? "Match Point"
                   : a.type === "setPoint" ? "Set Point"
                     : a.type === "breakPoint" ? "Break Point"
-                      : "Tiebreak"
+                      : a.type === "matchTiebreak" ? "Match Tiebreak"
+                        : "Tiebreak"
               )
               .join(" · ")}
           </div>
@@ -460,7 +461,7 @@ export default function TournamentView({ tournament: initialTournament, onBack }
               {[0, 1].map(pi => (
                 <div key={pi}>
                   <div style={{ fontSize: 11, color: S.textDim, textTransform: "uppercase", letterSpacing: 1 }}>
-                    {activeMatch.isTiebreak ? "TB" : "Points"}
+                    {activeMatch.isMatchTiebreak ? "MTB" : activeMatch.isTiebreak ? "TB" : "Points"}
                   </div>
                   <div style={{ fontFamily: "'Oswald', sans-serif", fontSize: 36, fontWeight: 700, color: S.text }}>
                     {getPointDisplay(activeMatch, pi)}

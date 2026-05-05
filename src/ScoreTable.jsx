@@ -31,7 +31,7 @@ export default function ScoreTable({ match, compact, large }) {
               width: large ? 70 : compact ? 40 : 50,
               textAlign: "center",
             }}>
-              {match.isTiebreak ? "TB" : "Pts"}
+              {match.isMatchTiebreak ? "MTB" : match.isTiebreak ? "TB" : "Pts"}
             </th>
           )}
         </tr>

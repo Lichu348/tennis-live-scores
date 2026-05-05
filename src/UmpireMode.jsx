@@ -603,7 +603,8 @@ export default function UmpireMode({ onBack, onLock }) {
               a.type === "matchPoint" ? "Match Point"
                 : a.type === "setPoint" ? "Set Point"
                   : a.type === "breakPoint" ? "Break Point"
-                    : "Tiebreak"
+                    : a.type === "matchTiebreak" ? "Match Tiebreak"
+                      : "Tiebreak"
             )
             .join(" · ")}
         </div>
@@ -625,7 +626,7 @@ export default function UmpireMode({ onBack, onLock }) {
             {[0, 1].map(pi => (
               <div key={pi}>
                 <div style={{ fontSize: 11, color: S.textDim, textTransform: "uppercase", letterSpacing: 1 }}>
-                  {match.isTiebreak ? "TB" : "Points"}
+                  {match.isMatchTiebreak ? "MTB" : match.isTiebreak ? "TB" : "Points"}
                 </div>
                 <div style={{ fontFamily: "'Oswald', sans-serif", fontSize: 36, fontWeight: 700, color: S.text }}>
                   {getPointDisplay(match, pi)}
