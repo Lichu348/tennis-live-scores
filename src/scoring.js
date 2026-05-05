@@ -569,6 +569,106 @@ export function undoPoint(m) {
 }
 
 /**
+ * Score a game directly (for No Umpire mode).
+ * Skips point-by-point tracking - just adds a game to the player.
+ * Handles sets, tiebreaks, and match tiebreaks.
+ */
+export function scoreGame(m, pi) {
+  if (m.status !== "live") return m;
+
+  const next = deepClone(m);
+  next.history = [...m.history, snapshot(m)];
+
+  // Handle match tiebreak - each "game" is actually a point in the tiebreak
+  if (next.isMatchTiebreak) {
+    next.points[pi]++;
+    const oi = 1 - pi;
+    if (next.points[pi] >= 10 && next.points[pi] - next.points[oi] >= 2) {
+      // Won the match tiebreak
+      const cs = currentSet(next);
+      cs[pi] = 1;
+      cs[oi] = 0;
+      next.points = [0, 0];
+      next.isMatchTiebreak = false;
+      next.status = "finished";
+      next.winner = pi;
+      next.finishedAt = Date.now();
+    }
+  }
+  // Handle regular set tiebreak - each "game" is a point in the tiebreak
+  else if (next.isTiebreak) {
+    next.points[pi]++;
+    const oi = 1 - pi;
+    if (next.points[pi] >= 7 && next.points[pi] - next.points[oi] >= 2) {
+      // Won the tiebreak - win the set
+      const cs = currentSet(next);
+      cs[pi]++;
+      next.points = [0, 0];
+      next.isTiebreak = false;
+
+      // Check if match is won
+      let wins = next.sets.filter(s => s[pi] > s[1 - pi]).length;
+      if (wins >= setsNeeded(next)) {
+        next.status = "finished";
+        next.winner = pi;
+        next.finishedAt = Date.now();
+      } else {
+        // Start new set
+        next.sets.push([0, 0]);
+        // Check if entering deciding set with match tiebreak
+        if (next.useMatchTiebreak && isDecidingSet(next)) {
+          next.isMatchTiebreak = true;
+        }
+      }
+    }
+  }
+  // Regular game
+  else {
+    const cs = currentSet(next);
+    cs[pi]++;
+    const oi = 1 - pi;
+
+    // Check for set win
+    let setWon = false;
+    if (cs[pi] >= 6 && cs[pi] - cs[oi] >= 2) {
+      setWon = true;
+    } else if (cs[0] === 6 && cs[1] === 6) {
+      // Enter tiebreak
+      next.isTiebreak = true;
+      next.points = [0, 0];
+    }
+
+    if (setWon) {
+      // Check if match is won
+      let wins = next.sets.filter(s => s[pi] > s[1 - pi]).length;
+      if (wins >= setsNeeded(next)) {
+        next.status = "finished";
+        next.winner = pi;
+        next.finishedAt = Date.now();
+      } else {
+        // Start new set
+        next.sets.push([0, 0]);
+        // Check if entering deciding set with match tiebreak
+        if (next.useMatchTiebreak && isDecidingSet(next)) {
+          next.isMatchTiebreak = true;
+        }
+      }
+    }
+  }
+
+  // Record the event
+  const event = {
+    type: "game",
+    player: pi,
+    timestamp: Date.now(),
+    index: (m.events || []).length,
+  };
+  next.events = [...(m.events || []), event];
+
+  return next;
+}
+
+/**
  * Rewind match to a specific point in history by event index.
  * Returns match state after applying events[0..eventIndex].
  */

@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
-import { Smartphone, Monitor, Settings, Trophy } from "lucide-react";
+import { Smartphone, Monitor, Settings, Trophy, Users } from "lucide-react";
 import UmpireMode from "./UmpireMode";
+import NoUmpireMode from "./NoUmpireMode";
 import SpectatorMode from "./SpectatorMode";
 import AdminMode from "./AdminMode";
 import TournamentMode from "./TournamentMode";
@@ -159,6 +160,7 @@ export default function App() {
   }, []);
 
   if (mode === "umpire") return <Shell><UmpireMode onBack={() => setMode(null)} onLock={handleLock} /></Shell>;
+  if (mode === "noumpire") return <Shell><NoUmpireMode onBack={() => setMode(null)} /></Shell>;
   if (mode === "spectator") return <Shell><SpectatorMode onBack={() => setMode(null)} /></Shell>;
   if (mode === "admin") return <Shell><AdminMode onBack={() => setMode(null)} /></Shell>;
   if (mode === "tournament") return <Shell><TournamentMode onBack={() => setMode(null)} /></Shell>;
@@ -194,7 +196,17 @@ export default function App() {
           gradient={`linear-gradient(135deg, ${S.green}, #1a5c38)`}
           borderColor="#34d37a33"
           title="Umpire"
-          subtitle="Score a match from your phone"
+          subtitle="Score a match point by point"
+        />
+
+        {/* No Umpire button */}
+        <ModeButton
+          onClick={() => setMode("noumpire")}
+          icon={<Users size={32} color="#fff" />}
+          gradient="linear-gradient(135deg, #6b46c1, #4c1d95)"
+          borderColor="#8b5cf633"
+          title="No Umpire"
+          subtitle="Players track games themselves"
         />
 
         {/* Spectator button */}
