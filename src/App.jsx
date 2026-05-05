@@ -82,6 +82,8 @@ export default function App() {
       }
     } catch (err) {
       console.error("Failed to check PIN status:", err);
+      // CRITICAL: Clear pending mode on error to prevent any bypass
+      setPendingMode(null);
       // On error, show error in PIN modal - do NOT bypass security
       setPinError(`Unable to connect: ${err.message}. Please check your connection and try again.`);
       setPinMode("entry"); // Show entry mode so user sees the error
@@ -89,15 +91,15 @@ export default function App() {
     }
   }, []);
 
-  // Handle umpire mode request
+  // Handle umpire mode request - PIN disabled for now
   const handleUmpireClick = useCallback(() => {
-    handleProtectedModeClick("umpire");
-  }, [handleProtectedModeClick]);
+    setMode("umpire");
+  }, []);
 
-  // Handle admin mode request
+  // Handle admin mode request - PIN disabled for now
   const handleAdminClick = useCallback(() => {
-    handleProtectedModeClick("admin");
-  }, [handleProtectedModeClick]);
+    setMode("admin");
+  }, []);
 
   // Handle PIN submission
   const handlePinSubmit = useCallback(async (pin) => {
@@ -192,7 +194,7 @@ export default function App() {
           gradient={`linear-gradient(135deg, ${S.green}, #1a5c38)`}
           borderColor="#34d37a33"
           title="Umpire"
-          subtitle={hasPinSet ? "PIN protected" : "Score a match from your phone"}
+          subtitle="Score a match from your phone"
         />
 
         {/* Spectator button */}
@@ -205,9 +207,9 @@ export default function App() {
           subtitle="Live scoreboard for all courts"
         />
 
-        {/* Tournament button */}
+        {/* Tournament button - PIN disabled for now */}
         <ModeButton
-          onClick={() => handleProtectedModeClick("tournament")}
+          onClick={() => setMode("tournament")}
           icon={<Trophy size={32} color="#fff" />}
           gradient={`linear-gradient(135deg, ${S.gold}, #b8860b)`}
           borderColor="#d4a84333"
@@ -222,7 +224,7 @@ export default function App() {
           gradient="linear-gradient(135deg, #4a4a4a, #2a2a2a)"
           borderColor="#6b728033"
           title="Admin"
-          subtitle={hasPinSet ? "PIN protected" : "Manage matches"}
+          subtitle="Manage matches"
         />
       </div>
 

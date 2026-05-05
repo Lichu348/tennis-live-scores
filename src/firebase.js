@@ -426,12 +426,22 @@ export function subscribeToTournaments(callback, onError) {
 
 /**
  * Update a specific bracket match (set matchId when scoring starts, winnerId when complete).
+ *
+ * @param tournamentId - The tournament ID
+ * @param roundIndex - The round index (0-based)
+ * @param matchPosition - The match position (1-based)
+ * @param matchUpdates - Fields to update on the specific match
+ * @param tournamentUpdates - Additional fields to update on the tournament (e.g., standings)
+ *                           This ensures atomic updates to avoid race conditions.
  */
-export async function updateBracketMatch(tournamentId, roundIndex, matchPosition, updates) {
-  const tournament = await loadTournament(tournamentId);
-  if (!tournament) {
+export async function updateBracketMatch(tournamentId, roundIndex, matchPosition, matchUpdates, tournamentUpdates = {}) {
+  const tournamentRef = ref(db, `tournaments/${tournamentId}`);
+  const snap = await get(tournamentRef);
+  if (!snap.exists()) {
     throw new Error(`Tournament ${tournamentId} not found`);
   }
+
+  const tournament = snap.val();
 
   const rounds = tournament.rounds.map((r, ri) => {
     if (ri !== roundIndex) return r;
@@ -439,10 +449,16 @@ export async function updateBracketMatch(tournamentId, roundIndex, matchPosition
       ...r,
       matches: r.matches.map((m, mi) => {
         if (mi !== matchPosition - 1) return m;
-        return { ...m, ...updates };
+        return { ...m, ...matchUpdates };
       }),
     };
   });
 
-  await updateTournament(tournamentId, { rounds });
+  // Single atomic write with both rounds and any additional tournament updates
+  await set(tournamentRef, {
+    ...tournament,
+    ...tournamentUpdates,
+    rounds,
+    updatedAt: Date.now()
+  });
 }

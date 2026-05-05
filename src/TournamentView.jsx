@@ -5,8 +5,7 @@ import {
 } from "lucide-react";
 import {
   subscribeToTournament, subscribeToMatch, updateBracketMatch,
-  saveMatch, removeMatch, acquireLock, refreshLock, checkMatchLock,
-  updateTournament
+  saveMatch, removeMatch, acquireLock, refreshLock, checkMatchLock
 } from "./firebase";
 import {
   getEntryById, isMatchReady, advanceWinner, getTournamentProgress,
@@ -262,7 +261,7 @@ export default function TournamentView({ tournament: initialTournament, onBack }
     const winnerEntryId = match.winner === 0 ? match.entry1Id : match.entry2Id;
 
     try {
-      // Handle round-robin differently - update standings only, don't touch other fixtures
+      // Handle round-robin differently - update standings AND winnerId atomically
       if (tournament.format === "round_robin") {
         // Calculate sets and games from the match scores
         const entry1Sets = match.sets.filter(s => s[0] > s[1]).length;
@@ -278,13 +277,10 @@ export default function TournamentView({ tournament: initialTournament, onBack }
           entry2Games,
         });
 
-        // Persist updated standings to Firebase FIRST
-        await updateTournament(tournament.id, { standings: updatedTournament.standings });
-
-        // THEN update this specific match with winnerId
+        // ATOMIC: Update winnerId AND standings in a single write to prevent race condition
         await updateBracketMatch(tournament.id, roundIndex, matchPosition, {
           winnerId: winnerEntryId,
-        });
+        }, { standings: updatedTournament.standings });
         return;
       }
 
